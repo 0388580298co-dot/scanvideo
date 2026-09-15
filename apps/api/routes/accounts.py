@@ -1,6 +1,11 @@
+from __future__ import annotations
+
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
+from apps.api.core.config import settings
 from apps.api.db.base import SessionLocal
 from apps.api.db.models import PlatformAccount
 from apps.api.schemas.accounts import AccountCreateRequest, AccountResponse
@@ -8,10 +13,24 @@ from apps.api.schemas.accounts import AccountCreateRequest, AccountResponse
 router = APIRouter(prefix="/api/v1/accounts", tags=["accounts"])
 
 
+def _validate_credential_ref(value: str | None) -> str | None:
+    if not value:
+        return None
+    root = settings.secret_root.resolve()
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    resolved = path.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise HTTPException(status_code=400, detail="credential_ref must point inside SECRET_ROOT")
+    return str(resolved)
+
+
 @router.post("", response_model=AccountResponse, status_code=201)
 def create_account(request: AccountCreateRequest) -> AccountResponse:
+    credential_ref = _validate_credential_ref(request.credential_ref)
     with SessionLocal() as session:
-        row = PlatformAccount(platform=request.platform, account_name=request.account_name, credential_ref=request.credential_ref, enabled=True)
+        row = PlatformAccount(platform=request.platform, account_name=request.account_name.strip(), credential_ref=credential_ref, enabled=True)
         session.add(row)
         session.commit()
         session.refresh(row)
