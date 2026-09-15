@@ -11,16 +11,10 @@ class YouTubePublisher:
         self.credentials_file = credentials_file
         self.token_file = token_file
 
-    def upload(self, video_path: Path, title: str, description: str = "", privacy: str = "private", tags: list[str] | None = None, publish_at: datetime | None = None) -> dict:
-        if privacy not in {"private", "unlisted", "public"}:
-            raise ValueError("Invalid YouTube privacy status")
-        if not video_path.exists() or video_path.stat().st_size == 0:
-            raise FileNotFoundError(video_path)
+    def _credentials(self):
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
         from google_auth_oauthlib.flow import Flow
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
         from apps.api.core.config import settings
 
         scopes = ["https://www.googleapis.com/auth/youtube.upload"]
@@ -39,7 +33,17 @@ class YouTubePublisher:
                 raise RuntimeError(f"YouTube OAuth required. Open {url} then retry the publish job.")
             self.token_file.parent.mkdir(parents=True, exist_ok=True)
             self.token_file.write_text(creds.to_json(), encoding="utf-8")
+        return creds
 
+    def upload(self, video_path: Path, title: str, description: str = "", privacy: str = "private", tags: list[str] | None = None, publish_at: datetime | None = None) -> dict:
+        if privacy not in {"private", "unlisted", "public"}:
+            raise ValueError("Invalid YouTube privacy status")
+        if not video_path.exists() or video_path.stat().st_size == 0:
+            raise FileNotFoundError(video_path)
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+
+        creds = self._credentials()
         status = {"privacyStatus": privacy}
         if publish_at is not None:
             status["privacyStatus"] = "private"
@@ -51,3 +55,15 @@ class YouTubePublisher:
         while response is None:
             _, response = request.next_chunk()
         return response
+
+    def lookup(self, video_id: str) -> dict | None:
+        """Return an existing uploaded video, or None when the provider has no match."""
+        if not video_id:
+            return None
+        from googleapiclient.discovery import build
+
+        response = build("youtube", "v3", credentials=self._credentials()).videos().list(
+            part="id,status,snippet", id=video_id
+        ).execute()
+        items = response.get("items", [])
+        return items[0] if items else None
