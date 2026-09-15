@@ -4,6 +4,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy.exc import IntegrityError
+
 from apps.api.core.config import settings
 from apps.api.db.base import SessionLocal
 from apps.api.db.models import Job, PlatformAccount, PublishAttempt, PublishedPost, ScheduledPost
@@ -190,7 +192,6 @@ def publish_scheduled(self, post_id: int) -> dict:
             return {"post_id": post_id, "status": "PUBLISHED", "external_id": existing.external_id}
         attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
         if attempt and not attempt.external_id:
-            # Another worker owns the pre-upload attempt. Do not start a second provider upload.
             return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt already in progress"}
 
     try:
@@ -206,7 +207,11 @@ def publish_scheduled(self, post_id: int) -> dict:
             if attempt is None:
                 attempt = PublishAttempt(scheduled_post_id=post_id, platform=platform, status="STARTED")
                 session.add(attempt)
-                session.commit()
+                try:
+                    session.commit()
+                except IntegrityError:
+                    session.rollback()
+                    return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt claimed by another worker"}
             elif not attempt.external_id:
                 return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt already in progress"}
             job_snapshot = Job(id=job_id, source_url="", status="PUBLISHED", output_path=output_path)
