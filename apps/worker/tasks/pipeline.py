@@ -5,10 +5,14 @@ from apps.api.schemas.jobs import JobStatus
 from apps.api.services.job_store import job_store
 from apps.worker.celery_app import celery_app
 from apps.worker.services.audio import build_tts_manifest, extract_audio
+from apps.worker.services.audio_mix import mix_narration_with_background
 from apps.worker.services.media import download_video, validate_video
+from apps.worker.services.qc import quality_gate
+from apps.worker.services.render import render_subtitles
 from apps.worker.services.subtitles import write_srt
 from apps.worker.services.transcription import WhisperTranscriber, save_transcript
 from apps.worker.services.translation import translate_segments
+from apps.worker.services.tts import EdgeTTSProvider, synthesize_segments
 
 
 @celery_app.task(bind=True, name="scanvideo.run_pipeline", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
@@ -31,31 +35,51 @@ def run_pipeline(
         job_store.update(job_id, status=JobStatus.VALIDATING, progress=20, message="Checking media and duration")
         metadata = validate_video(source_path, min_seconds, max_seconds)
 
-        job_store.update(job_id, status=JobStatus.TRANSCRIBING, progress=30, message="Extracting source audio")
+        job_store.update(job_id, status=JobStatus.TRANSCRIBING, progress=30, message="Extracting and transcribing source audio")
         audio_path = extract_audio(source_path, job_dir / "source.wav")
         transcript_path = job_dir / "transcript.json"
         segments = WhisperTranscriber(model_size="small").transcribe(audio_path)
+        if not segments:
+            raise RuntimeError("No speech segments were detected")
         save_transcript(segments, transcript_path)
 
         job_store.update(job_id, progress=50, message=f"Transcribed {len(segments)} speech segments")
-        job_store.update(job_id, status=JobStatus.TRANSLATING, progress=60, message=f"Translating to {target_language}")
+        job_store.update(job_id, status=JobStatus.TRANSLATING, progress=55, message=f"Translating to {target_language}")
         translated = translate_segments(segments, target_language)
-        subtitle_path = write_srt(translated, job_dir / "subtitles.vi.srt")
+        subtitle_path = write_srt(translated, job_dir / f"subtitles.{target_language}.srt")
+        build_tts_manifest(translated, job_dir / "tts_manifest.json")
 
-        job_store.update(job_id, status=JobStatus.SYNTHESIZING, progress=70, message="Preparing timing-safe TTS manifest")
-        manifest_path = build_tts_manifest(translated, job_dir / "tts_manifest.json")
+        job_store.update(job_id, status=JobStatus.SYNTHESIZING, progress=65, message="Generating timing-safe Vietnamese narration")
+        tts_dir = job_dir / "tts"
+        voice = getattr(settings, "tts_voice", "vi-VN-HoaiMyNeural")
+        rate = getattr(settings, "tts_rate", "+0%")
+        provider = EdgeTTSProvider(voice=voice, rate=rate)
+        narration_paths = synthesize_segments(provider, translated, tts_dir)
 
-        # Actual TTS provider is intentionally not invoked yet. A provider must be
-        # configured explicitly; silently generating placeholder audio would make
-        # the final video look successful while containing incorrect narration.
-        job_store.update(job_id, status=JobStatus.RENDERING, progress=80, message="Localization assets prepared")
-        job_store.update(job_id, status=JobStatus.QC, progress=95, message="Source media and timing assets validated")
+        job_store.update(job_id, status=JobStatus.RENDERING, progress=80, message="Mixing narration and rendering subtitles")
+        narrated_path = job_dir / "localized_narration.mp4"
+        mix_narration_with_background(
+            source_path,
+            narration_paths,
+            translated,
+            narrated_path,
+            narration_gain_db=3.0,
+            background_gain_db=-10.0,
+        )
+        final_path = job_dir / "final_vi.mp4"
+        render_subtitles(narrated_path, subtitle_path, final_path)
+
+        job_store.update(job_id, status=JobStatus.QC, progress=95, message="Running final quality checks")
+        qc = quality_gate(final_path, expected_min_duration=max(1.0, min_seconds))
+        if not qc.get("passed"):
+            raise RuntimeError(f"Quality gate failed: {qc}")
+
         job_store.update(
             job_id,
             status=JobStatus.COMPLETED,
             progress=100,
-            message="Download, validation, transcription, translation and subtitle preparation completed",
-            output_path=str(source_path),
+            message="Localized video rendered and QC passed",
+            output_path=str(final_path),
         )
         return {
             "job_id": job_id,
@@ -63,8 +87,11 @@ def run_pipeline(
             "audio": str(audio_path),
             "transcript": str(transcript_path),
             "subtitles": str(subtitle_path),
-            "tts_manifest": str(manifest_path),
+            "tts_manifest": str(job_dir / "tts_manifest.json"),
+            "narrated_video": str(narrated_path),
+            "output": str(final_path),
             "metadata": metadata,
+            "qc": qc,
         }
     except Exception as exc:
         job_store.update(job_id, status=JobStatus.FAILED, message="Pipeline failed", error=str(exc))
