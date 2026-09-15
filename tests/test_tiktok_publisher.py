@@ -30,6 +30,52 @@ def test_tiktok_requires_explicit_available_privacy(monkeypatch, tmp_path):
         publisher.publish_file(video, "test", "FOLLOWER_OF_CREATOR")
 
 
+def test_tiktok_rejects_video_above_creator_duration_limit(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    publisher = TikTokPublisher(access_token="token", token_file=tmp_path / "missing.json")
+    monkeypatch.setattr(
+        publisher,
+        "creator_info",
+        lambda: {"privacy_level_options": ["SELF_ONLY"], "max_video_post_duration_sec": 30},
+    )
+    monkeypatch.setattr(
+        "apps.worker.services.publishers.tiktok.probe_video",
+        lambda _: {"format": {"duration": "30.2"}},
+    )
+
+    with pytest.raises(ValueError, match="exceeds TikTok creator limit"):
+        publisher.publish_file(video, "test", "SELF_ONLY")
+
+
+def test_tiktok_allows_video_within_creator_duration_limit(monkeypatch, tmp_path):
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"video")
+    publisher = TikTokPublisher(access_token="token", token_file=tmp_path / "missing.json")
+    monkeypatch.setattr(
+        publisher,
+        "creator_info",
+        lambda: {"privacy_level_options": ["SELF_ONLY"], "max_video_post_duration_sec": 30},
+    )
+    monkeypatch.setattr(
+        "apps.worker.services.publishers.tiktok.probe_video",
+        lambda _: {"format": {"duration": "29.9"}},
+    )
+    monkeypatch.setattr(
+        "apps.worker.services.publishers.tiktok.requests.post",
+        lambda *args, **kwargs: FakeResponse(
+            {"data": {"publish_id": "pub-123", "upload_url": "https://upload.test"}, "error": {"code": "ok"}}
+        ),
+    )
+    monkeypatch.setattr(
+        "apps.worker.services.publishers.tiktok.requests.put",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    result = publisher.publish_file(video, "test", "SELF_ONLY")
+    assert result["data"]["publish_id"] == "pub-123"
+
+
 def test_tiktok_publish_uses_creator_privacy_and_returns_publish_id(monkeypatch, tmp_path):
     video = tmp_path / "video.mp4"
     video.write_bytes(b"video-data")
