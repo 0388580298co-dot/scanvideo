@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 
 from apps.api.db.base import SessionLocal
-from apps.api.db.models import Job
+from apps.api.db.models import Job, SourceMedia
 from apps.api.schemas.jobs import CreateJobRequest, JobResponse, JobStatus
 
 
@@ -54,6 +54,33 @@ class JobStore:
             session.commit()
             session.refresh(record)
             return self._response(record)
+
+    def find_source_by_fingerprint(self, fingerprint: str) -> SourceMedia | None:
+        with SessionLocal() as session:
+            return session.scalar(select(SourceMedia).where(SourceMedia.fingerprint == fingerprint))
+
+    def register_source_media(
+        self,
+        job_id: str,
+        source_url: str,
+        fingerprint: str,
+        path: str,
+        duration: float,
+        width: int,
+        height: int,
+    ) -> None:
+        record = SourceMedia(
+            job_id=job_id,
+            source_url=source_url,
+            fingerprint=fingerprint,
+            path=path,
+            duration=duration,
+            width=width,
+            height=height,
+        )
+        with SessionLocal() as session:
+            session.add(record)
+            session.commit()
 
     @staticmethod
     def _response(record: Job) -> JobResponse:
