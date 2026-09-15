@@ -9,9 +9,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
-
 COPY pyproject.toml ./
 RUN pip install --upgrade pip \
-    && pip install -e '.[dev,media,translation]'
-
+    && pip install -e '.[dev,media,translation,publishing]'
 COPY . .
