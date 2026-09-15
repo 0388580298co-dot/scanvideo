@@ -11,5 +11,6 @@ RUN apt-get update \
 WORKDIR /workspace
 COPY pyproject.toml ./
 RUN pip install --upgrade pip \
-    && pip install -e '.[dev,media,translation,publishing]'
+    && pip install -e '.[dev,media,translation,publishing]' \
+    && playwright install --with-deps chromium
 COPY . .
