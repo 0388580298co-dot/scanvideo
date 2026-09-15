@@ -11,6 +11,7 @@ class MediaError(RuntimeError):
 
 
 def download_video(url: str, output_dir: Path, min_duration: float = 10.0, max_duration: float = 180.0) -> Path:
+    """Download only sources whose metadata duration is within the configured bounds."""
     output_dir.mkdir(parents=True, exist_ok=True)
     template = str(output_dir / "source.%(ext)s")
     duration_filter = f"duration >= {min_duration} & duration <= {max_duration}"
