@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     elevenlabs_api_key: str = ""
     youtube_access_token: str = ""
-    youtube_client_secrets_file: Path = Path("/secrets/client_secret.json")
-    youtube_token_file: Path = Path("/secrets/youtube_token.json")
+    youtube_client_secrets_file: Path = Path("./.secrets/client_secret.json")
+    youtube_token_file: Path = Path("./.secrets/youtube_token.json")
     tiktok_access_token: str = ""
     tiktok_client_key: str = ""
     tiktok_client_secret: str = ""
