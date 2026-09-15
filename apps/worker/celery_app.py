@@ -7,7 +7,7 @@ celery_app = Celery(
     "scanvideo",
     broker=os.getenv("REDIS_URL", "redis://redis:6379/0"),
     backend=os.getenv("REDIS_URL", "redis://redis:6379/0"),
-    include=["apps.worker.tasks.pipeline"],
+    include=["apps.worker.tasks.pipeline", "apps.worker.tasks.publishing"],
 )
 
 celery_app.conf.update(
@@ -16,7 +16,13 @@ celery_app.conf.update(
     accept_content=["json"],
     task_track_started=True,
     timezone="Asia/Ho_Chi_Minh",
-    enable_utc=False,
+    enable_utc=True,
+    beat_schedule={
+        "dispatch-due-posts-every-30-seconds": {
+            "task": "scanvideo.dispatch_due_posts",
+            "schedule": 30.0,
+        },
+    },
 )
 
 
