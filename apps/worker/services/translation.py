@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -24,13 +25,17 @@ class PassthroughTranslator:
 
 
 def translate_segments(segments: list[TranscriptSegment], target_language: str) -> list[TranslationSegment]:
-    if target_language.lower() in {"vi", "vie", "vietnamese"}:
-        try:
-            from apps.worker.services.openai_translate import OpenAITranslator
-            return OpenAITranslator().translate_segments(
-                [TranslationSegment(s.start, s.end, s.text, "") for s in segments], target_language
-            )
-        except Exception:
-            # Keep local/offline development usable when no provider key is configured.
-            pass
-    return PassthroughTranslator().translate(segments, target_language)
+    provider = os.getenv("SCANVIDEO_TRANSLATION_PROVIDER", "openai").lower().strip()
+    if provider == "passthrough":
+        return PassthroughTranslator().translate(segments, target_language)
+
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "OPENAI_API_KEY is required for translation. Set SCANVIDEO_TRANSLATION_PROVIDER=passthrough "
+            "only for local testing."
+        )
+
+    from apps.worker.services.openai_translate import OpenAITranslator
+
+    input_segments = [TranslationSegment(s.start, s.end, s.text, "") for s in segments]
+    return OpenAITranslator().translate_segments(input_segments, target_language)
