@@ -26,42 +26,19 @@ class SchedulerService:
                 raise SchedulingError("Only completed jobs can be scheduled")
             if not job.output_path:
                 raise SchedulingError("Job has no output media")
-
-            account_id = request.account_id
-            if account_id is None:
-                account_id = session.scalar(
-                    select(PlatformAccount.id).where(
-                        PlatformAccount.platform == request.platform,
-                        PlatformAccount.enabled.is_(True),
-                    ).order_by(PlatformAccount.id).limit(1)
-                )
+            account_id = request.account_id or session.scalar(select(PlatformAccount.id).where(PlatformAccount.platform == request.platform, PlatformAccount.enabled.is_(True)).order_by(PlatformAccount.id).limit(1))
             if account_id is None:
                 raise SchedulingError("No enabled platform account is configured")
             account = session.get(PlatformAccount, account_id)
             if account is None or not account.enabled or account.platform != request.platform:
                 raise SchedulingError("Invalid platform account")
-
-            duplicate = session.scalar(
-                select(ScheduledPost).where(
-                    ScheduledPost.job_id == request.job_id,
-                    ScheduledPost.platform == request.platform,
-                    ScheduledPost.scheduled_at == when,
-                    ScheduledPost.status.in_(["SCHEDULED", "PROCESSING"]),
-                )
-            )
+            duplicate = session.scalar(select(ScheduledPost).where(ScheduledPost.job_id == request.job_id, ScheduledPost.platform == request.platform, ScheduledPost.scheduled_at == when, ScheduledPost.status.in_(["SCHEDULED", "PROCESSING"])))
             if duplicate:
                 return self._response(duplicate)
-
-            post = ScheduledPost(
-                job_id=request.job_id,
-                platform_account_id=account_id,
-                platform=request.platform,
-                title=request.title,
-                description=request.description,
-                privacy_level=request.privacy_level,
-                scheduled_at=when,
-                status="SCHEDULED",
-            )
+            package = job.content_package or {}
+            title = request.title or str(package.get("title", "ScanVideo"))
+            description = request.description or str(package.get("description", ""))
+            post = ScheduledPost(job_id=request.job_id, platform_account_id=account_id, platform=request.platform, title=title, description=description, privacy_level=request.privacy_level, scheduled_at=when, status="SCHEDULED")
             session.add(post)
             job.status = "SCHEDULED"
             job.updated_at = datetime.now(timezone.utc)
@@ -77,38 +54,16 @@ class SchedulerService:
     def due(self, now: datetime | None = None) -> list[int]:
         current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         with SessionLocal() as session:
-            rows = session.scalars(
-                select(ScheduledPost).where(
-                    ScheduledPost.status == "SCHEDULED",
-                    ScheduledPost.scheduled_at <= current,
-                ).with_for_update(skip_locked=True)
-            ).all()
+            rows = session.scalars(select(ScheduledPost).where(ScheduledPost.status == "SCHEDULED", ScheduledPost.scheduled_at <= current).with_for_update(skip_locked=True)).all()
             ids = [row.id for row in rows]
             for row in rows:
                 row.status = "PROCESSING"
             session.commit()
             return ids
 
-    def mark_failed(self, post_id: int, error: str) -> None:
-        with SessionLocal() as session:
-            post = session.get(ScheduledPost, post_id)
-            if post:
-                post.status = "FAILED"
-                post.error = error[:4000]
-                session.commit()
-
     @staticmethod
     def _response(post: ScheduledPost) -> ScheduleResponse:
-        return ScheduleResponse(
-            id=post.id,
-            job_id=post.job_id,
-            platform=post.platform,
-            scheduled_at=post.scheduled_at,
-            status=post.status,
-            title=post.title,
-            description=post.description,
-            account_id=post.platform_account_id,
-        )
+        return ScheduleResponse(id=post.id, job_id=post.job_id, platform=post.platform, scheduled_at=post.scheduled_at, status=post.status, title=post.title, description=post.description, account_id=post.platform_account_id)
 
 
 scheduler_service = SchedulerService()
