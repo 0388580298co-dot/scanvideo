@@ -15,7 +15,7 @@ from apps.api.db.base import SessionLocal
 from apps.api.db.models import PlatformAccount
 
 router = APIRouter(prefix="/api/v1/oauth", tags=["oauth"])
-STATE_DIR = Path("/secrets/oauth")
+STATE_DIR = settings.secret_root / "oauth"
 
 
 def _state_file(platform: str) -> Path:
@@ -94,7 +94,7 @@ def tiktok_callback(code: str = Query(...), state: str = Query(...)) -> dict:
     if response.status_code >= 400:
         raise HTTPException(status_code=502, detail="TikTok OAuth token exchange failed")
     payload = response.json()
-    token_path = Path("/secrets/oauth/tiktok_token.json")
+    token_path = settings.secret_root / "oauth" / "tiktok_token.json"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     _ensure_account("tiktok", "TikTok OAuth account", str(token_path))
