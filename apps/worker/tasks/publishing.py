@@ -16,6 +16,10 @@ class PublishingError(RuntimeError):
     pass
 
 
+class PublishTerminalError(PublishingError):
+    """The provider has definitively rejected an already-submitted publication."""
+
+
 def _credential_path(value: str | None) -> Path | None:
     """Resolve an account credential reference without allowing paths outside secrets."""
     if not value:
@@ -119,7 +123,7 @@ def _finalize_published(session, post_id: int, job_id: str, platform: str, exter
 
 
 def _reconcile_existing(post_id: int) -> bool:
-    """Return True if an existing provider submission was safely finalized."""
+    """Finalize a known provider submission; never re-upload an ambiguous submission."""
     with SessionLocal() as session:
         snapshot = _snapshot(session, post_id)
         job_id, platform, _, _, _, _, account_id, account_platform, account_name, credential_ref = snapshot
@@ -139,7 +143,11 @@ def _reconcile_existing(post_id: int) -> bool:
             if existing:
                 _finalize_published(session, post_id, job_id, platform, attempt.external_id, existing)
                 return True
-            return False
+            attempt.provider_status = "NOT_FOUND"
+            attempt.updated_at = datetime.now(timezone.utc)
+            session.commit()
+            raise ConnectionError("youtube publish submission is not visible yet")
+
         status_payload = provider.publish_status(attempt.external_id)
         status = str(status_payload.get("data", {}).get("status") or "").upper()
         attempt.provider_status = status[:64] or None
@@ -147,11 +155,13 @@ def _reconcile_existing(post_id: int) -> bool:
         if status in {"PUBLISH_COMPLETE", "PUBLISHED", "COMPLETE"}:
             _finalize_published(session, post_id, job_id, platform, attempt.external_id, status_payload)
             return True
-        if status and status not in {"FAILED", "ERROR", "CANCELLED"}:
+        if status in {"FAILED", "ERROR", "CANCELLED"}:
+            attempt.status = "FAILED"
+            attempt.error = f"Provider terminal status: {status}"
             session.commit()
-            raise ConnectionError(f"{platform} publish still processing: {status}")
+            raise PublishTerminalError(attempt.error)
         session.commit()
-        return False
+        raise ConnectionError(f"{platform} publish status is not terminal: {status or 'UNKNOWN'}")
 
 
 @celery_app.task(
@@ -251,26 +261,33 @@ def reconcile_publish(self, post_id: int) -> dict:
                 return {"post_id": post_id, "status": "PUBLISHED"}
         if _reconcile_existing(post_id):
             return {"post_id": post_id, "status": "PUBLISHED"}
+        return {"post_id": post_id, "status": "NO_SUBMISSION"}
+    except PublishTerminalError as exc:
         with SessionLocal() as session:
             attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+            post = session.get(ScheduledPost, post_id)
             if attempt:
                 attempt.status = "FAILED"
-                attempt.error = "Provider reported a terminal failure"
-                session.commit()
-                post = session.get(ScheduledPost, post_id)
-                if post:
-                    post.status = "FAILED"
-                    post.error = attempt.error
-                    session.commit()
+                attempt.error = str(exc)[:4000]
+                attempt.updated_at = datetime.now(timezone.utc)
+            if post:
+                post.status = "FAILED"
+                post.error = str(exc)[:4000]
+            session.commit()
         return {"post_id": post_id, "status": "FAILED"}
     except ConnectionError as exc:
         if self.request.retries >= self.max_retries:
             with SessionLocal() as session:
                 post = session.get(ScheduledPost, post_id)
+                attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
                 if post:
                     post.status = "FAILED"
                     post.error = str(exc)[:4000]
-                    session.commit()
+                if attempt:
+                    attempt.status = "FAILED"
+                    attempt.error = str(exc)[:4000]
+                    attempt.updated_at = datetime.now(timezone.utc)
+                session.commit()
             raise
         raise self.retry(exc=exc, countdown=min(60, 10 + self.request.retries * 5))
     except Exception:
