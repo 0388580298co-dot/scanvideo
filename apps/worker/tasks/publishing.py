@@ -33,7 +33,15 @@ def _publish(post: ScheduledPost, job: Job) -> dict:
     raise PublishingError(f"Unsupported platform: {post.platform}")
 
 
-@celery_app.task(bind=True, name="scanvideo.publish_scheduled", max_retries=2, autoretry_for=(TimeoutError, ConnectionError), retry_backoff=True, retry_backoff_max=120, retry_jitter=True)
+@celery_app.task(
+    bind=True,
+    name="scanvideo.publish_scheduled",
+    max_retries=2,
+    autoretry_for=(TimeoutError, ConnectionError),
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+)
 def publish_scheduled(self, post_id: int) -> dict:
     with SessionLocal() as session:
         post = session.get(ScheduledPost, post_id)
@@ -44,22 +52,60 @@ def publish_scheduled(self, post_id: int) -> dict:
         job = session.get(Job, post.job_id)
         if job is None:
             raise PublishingError("Job not found")
+        job_id = post.job_id
+        platform = post.platform
+        title = post.title
+        description = post.description
+        privacy = post.privacy_level
+        output_path = job.output_path
+
     try:
-        result = _publish(post, job)
+        # Work from a detached snapshot so the SQLAlchemy session never crosses
+        # the network/upload boundary.
+        snapshot = Job(id=job_id, source_url="", status="PUBLISHED", output_path=output_path)
+        snapshot.output_path = output_path
+        post_snapshot = ScheduledPost(id=post_id, job_id=job_id, platform=platform, title=title, description=description, privacy_level=privacy)
+        result = _publish(post_snapshot, snapshot)
         external_id = str(result.get("id") or result.get("data", {}).get("publish_id") or "")
         now = datetime.now(timezone.utc)
         with SessionLocal() as session:
             db_post = session.get(ScheduledPost, post_id)
-            db_job = session.get(Job, post.job_id)
+            db_job = session.get(Job, job_id)
             if db_post is None or db_job is None:
                 raise PublishingError("Scheduled post disappeared during publish")
             db_post.status = "PUBLISHED"
             db_post.error = None
             db_job.status = "PUBLISHED"
             db_job.updated_at = now
-            session.add(PublishedPost(scheduled_post_id=post_id, platform=post.platform, external_id=external_id, published_at=now, metrics={"response": result}))
+            session.add(
+                PublishedPost(
+                    scheduled_post_id=post_id,
+                    platform=platform,
+                    external_id=external_id,
+                    published_at=now,
+                    metrics={"response": result},
+                )
+            )
             session.commit()
         return {"post_id": post_id, "status": "PUBLISHED", "external_id": external_id}
+    except (TimeoutError, ConnectionError) as exc:
+        # Celery will retry these transient failures. Do not mark the post
+        # permanently failed before the retry budget is exhausted.
+        retries = getattr(self.request, "retries", 0)
+        if retries >= self.max_retries:
+            with SessionLocal() as session:
+                db_post = session.get(ScheduledPost, post_id)
+                if db_post:
+                    db_post.status = "FAILED"
+                    db_post.error = str(exc)[:4000]
+                    session.commit()
+        else:
+            with SessionLocal() as session:
+                db_post = session.get(ScheduledPost, post_id)
+                if db_post:
+                    db_post.error = f"Temporary publishing error; retry {retries + 1}/{self.max_retries}"
+                    session.commit()
+        raise
     except Exception as exc:
         with SessionLocal() as session:
             db_post = session.get(ScheduledPost, post_id)
