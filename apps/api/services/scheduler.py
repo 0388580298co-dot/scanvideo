@@ -15,10 +15,9 @@ class SchedulingError(RuntimeError):
 
 class SchedulerService:
     def create(self, request: ScheduleCreateRequest) -> ScheduleResponse:
-        when = request.scheduled_at
-        if when.tzinfo is None:
+        if request.scheduled_at.tzinfo is None:
             raise SchedulingError("scheduled_at must include a timezone")
-        when = when.astimezone(timezone.utc)
+        when = request.scheduled_at.astimezone(timezone.utc)
         with SessionLocal() as session:
             job = session.get(Job, request.job_id)
             if job is None:
@@ -29,10 +28,18 @@ class SchedulerService:
                 raise SchedulingError("Job has no output media")
 
             account_id = request.account_id
-            if account_id is not None:
-                account = session.get(PlatformAccount, account_id)
-                if account is None or not account.enabled or account.platform != request.platform:
-                    raise SchedulingError("Invalid platform account")
+            if account_id is None:
+                account_id = session.scalar(
+                    select(PlatformAccount.id).where(
+                        PlatformAccount.platform == request.platform,
+                        PlatformAccount.enabled.is_(True),
+                    ).order_by(PlatformAccount.id).limit(1)
+                )
+            if account_id is None:
+                raise SchedulingError("No enabled platform account is configured")
+            account = session.get(PlatformAccount, account_id)
+            if account is None or not account.enabled or account.platform != request.platform:
+                raise SchedulingError("Invalid platform account")
 
             duplicate = session.scalar(
                 select(ScheduledPost).where(
@@ -48,6 +55,10 @@ class SchedulerService:
             post = ScheduledPost(
                 job_id=request.job_id,
                 platform_account_id=account_id,
+                platform=request.platform,
+                title=request.title,
+                description=request.description,
+                privacy_level=request.privacy_level,
                 scheduled_at=when,
                 status="SCHEDULED",
             )
@@ -56,7 +67,7 @@ class SchedulerService:
             job.updated_at = datetime.now(timezone.utc)
             session.commit()
             session.refresh(post)
-            return self._response(post, request)
+            return self._response(post)
 
     def list(self) -> list[ScheduleResponse]:
         with SessionLocal() as session:
@@ -83,18 +94,19 @@ class SchedulerService:
             post = session.get(ScheduledPost, post_id)
             if post:
                 post.status = "FAILED"
+                post.error = error[:4000]
                 session.commit()
 
     @staticmethod
-    def _response(post: ScheduledPost, request: ScheduleCreateRequest | None = None) -> ScheduleResponse:
+    def _response(post: ScheduledPost) -> ScheduleResponse:
         return ScheduleResponse(
             id=post.id,
             job_id=post.job_id,
-            platform=request.platform if request else "",
+            platform=post.platform,
             scheduled_at=post.scheduled_at,
             status=post.status,
-            title=request.title if request else "",
-            description=request.description if request else "",
+            title=post.title,
+            description=post.description,
             account_id=post.platform_account_id,
         )
 
