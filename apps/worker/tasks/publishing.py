@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+from sqlalchemy import select
+
+from apps.api.db.base import SessionLocal
+from apps.api.db.models import Job, PublishedPost, ScheduledPost
+from apps.worker.celery_app import celery_app
+from apps.worker.services.publishers.tiktok import TikTokPublisher
+from apps.worker.services.publishers.youtube import YouTubePublisher
+
+
+class PublishingError(RuntimeError):
+    pass
+
+
+def _publish(post: ScheduledPost, job: Job) -> dict:
+    if not job.output_path:
+        raise PublishingError("Job has no output media")
+    path = Path(job.output_path)
+    if not path.exists() or path.stat().st_size == 0:
+        raise PublishingError("Output media is missing")
+
+    if post.platform == "youtube":
+        credentials = Path(os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "/secrets/client_secret.json"))
+        token = Path(os.getenv("YOUTUBE_TOKEN_FILE", "/secrets/youtube_token.json"))
+        publisher = YouTubePublisher(credentials, token)
+        return publisher.upload(path, post.title, post.description, privacy=post.privacy_level or "private")
+    if post.platform == "tiktok":
+        token = os.getenv("TIKTOK_ACCESS_TOKEN", "")
+        if not token:
+            raise PublishingError("TIKTOK_ACCESS_TOKEN is not configured")
+        publisher = TikTokPublisher(token)
+        return publisher.publish_file(path, post.title, privacy_level=post.privacy_level or "SELF_ONLY")
+    raise PublishingError(f"Unsupported platform: {post.platform}")
+
+
+@celery_app.task(bind=True, name="scanvideo.publish_scheduled", max_retries=2, autoretry_for=(TimeoutError, ConnectionError), retry_backoff=True, retry_backoff_max=120, retry_jitter=True)
+def publish_scheduled(self, post_id: int) -> dict:
+    with SessionLocal() as session:
+        post = session.get(ScheduledPost, post_id)
+        if post is None:
+            raise PublishingError("Scheduled post not found")
+        if post.status != "PROCESSING":
+            return {"post_id": post_id, "status": post.status}
+        job = session.get(Job, post.job_id)
+        if job is None:
+            raise PublishingError("Job not found")
+
+    try:
+        result = _publish(post, job)
+        external_id = str(result.get("id") or result.get("data", {}).get("publish_id") or "")
+        now = datetime.now(timezone.utc)
+        with SessionLocal() as session:
+            db_post = session.get(ScheduledPost, post_id)
+            db_job = session.get(Job, post.job_id)
+            if db_post is None or db_job is None:
+                raise PublishingError("Scheduled post disappeared during publish")
+            db_post.status = "PUBLISHED"
+            db_post.error = None
+            db_job.status = "PUBLISHED"
+            db_job.updated_at = now
+            session.add(PublishedPost(scheduled_post_id=post_id, platform=post.platform, external_id=external_id, published_at=now, metrics={"response": result}))
+            session.commit()
+        return {"post_id": post_id, "status": "PUBLISHED", "external_id": external_id}
+    except Exception as exc:
+        with SessionLocal() as session:
+            db_post = session.get(ScheduledPost, post_id)
+            if db_post:
+                db_post.status = "FAILED"
+                db_post.error = str(exc)[:4000]
+                session.commit()
+        raise
+
+
+@celery_app.task(name="scanvideo.dispatch_due_posts")
+def dispatch_due_posts() -> dict:
+    from apps.api.services.scheduler import scheduler_service
+
+    ids = scheduler_service.due()
+    for post_id in ids:
+        publish_scheduled.delay(post_id)
+    return {"dispatched": len(ids), "post_ids": ids}
