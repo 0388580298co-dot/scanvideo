@@ -13,12 +13,7 @@ class MediaError(RuntimeError):
 
 
 def normalize_source_url(url: str) -> str:
-    """Normalize source URLs that yt-dlp cannot consume directly.
-
-    Douyin frequently shares videos as ``/jingxuan?modal_id=...`` (and other
-    page routes carrying ``modal_id``).  yt-dlp expects the canonical
-    ``/video/{id}`` route, so convert those links before invoking it.
-    """
+    """Normalize source URLs that yt-dlp cannot consume directly."""
     value = url.strip()
     parsed = urlparse(value)
     host = parsed.netloc.lower().split(":", 1)[0]
@@ -34,6 +29,73 @@ def _is_douyin_url(url: str) -> bool:
     return host in {"douyin.com", "www.douyin.com", "m.douyin.com", "v.douyin.com"}
 
 
+def _browser_download_douyin(url: str, output_dir: Path, min_duration: float, max_duration: float) -> Path:
+    """Use a normal browser page as a Douyin fallback when yt-dlp cannot extract it.
+
+    This only loads the public page and reads the HTML5 video source; it does not
+    solve CAPTCHAs, bypass access controls, or evade rate limits.
+    """
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise MediaError(
+            "Douyin không tải được bằng yt-dlp và Playwright chưa được cài trong worker."
+        ) from exc
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / "source.mp4"
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+                    ),
+                    extra_http_headers={"Referer": "https://www.douyin.com/"},
+                )
+                page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_function(
+                    "() => Array.from(document.querySelectorAll('video')).some(v => v.currentSrc || v.src)",
+                    timeout=30_000,
+                )
+                video_info = page.locator("video").evaluate_all(
+                    "els => els.map(v => ({src: v.currentSrc || v.src, duration: v.duration})).filter(x => x.src)"
+                )
+                if not video_info:
+                    raise MediaError("Douyin page không cung cấp video source công khai cho trình duyệt.")
+                info = next((item for item in video_info if item.get("src")), video_info[0])
+                duration = float(info.get("duration") or 0)
+                if duration and (duration < min_duration or duration > max_duration):
+                    raise MediaError(
+                        f"Video is outside duration limits: {duration:.2f}s "
+                        f"(allowed {min_duration:.2f}-{max_duration:.2f}s)"
+                    )
+                video_url = str(info["src"])
+                response = page.request.get(
+                    video_url,
+                    headers={"Referer": "https://www.douyin.com/"},
+                    timeout=120_000,
+                )
+                if not response.ok:
+                    raise MediaError(f"Douyin video source returned HTTP {response.status}")
+                target.write_bytes(response.body())
+            finally:
+                browser.close()
+    except PlaywrightTimeoutError as exc:
+        raise MediaError("Douyin page timed out while waiting for its video source.") from exc
+    except MediaError:
+        raise
+    except Exception as exc:
+        raise MediaError(f"Douyin browser fallback failed: {exc}") from exc
+
+    if not target.exists() or target.stat().st_size == 0:
+        raise MediaError("Douyin browser fallback produced an empty video file")
+    return target
+
+
 def download_video(url: str, output_dir: Path, min_duration: float = 10.0, max_duration: float = 180.0) -> Path:
     """Download only sources whose metadata duration is within the configured bounds."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -45,7 +107,8 @@ def download_video(url: str, output_dir: Path, min_duration: float = 10.0, max_d
         "--match-filter", duration_filter,
         "-f", "bv*+ba/b", "-o", template,
     ]
-    if _is_douyin_url(source_url):
+    is_douyin = _is_douyin_url(source_url)
+    if is_douyin:
         command.extend(["--add-header", "Referer: https://www.douyin.com/"])
         cookie_file = os.getenv("DOUYIN_COOKIE_FILE", "").strip()
         if cookie_file:
@@ -57,12 +120,14 @@ def download_video(url: str, output_dir: Path, min_duration: float = 10.0, max_d
         raise MediaError(f"Video download timed out after 900 seconds: {source_url}") from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout)[-3000:]
-        if _is_douyin_url(source_url) and "Fresh cookies" in detail:
-            raise MediaError(
-                "Douyin yêu cầu cookie mới để tải video. "
-                "Đặt DOUYIN_COOKIE_FILE trỏ tới file cookie của nội dung bạn được phép tải, "
-                "hoặc thử một video Douyin công khai khác."
-            )
+        if is_douyin:
+            if "Unsupported URL" in detail or "Fresh cookies" in detail or "Failed to parse JSON" in detail:
+                try:
+                    return _browser_download_douyin(source_url, output_dir, min_duration, max_duration)
+                except MediaError as browser_exc:
+                    raise MediaError(
+                        f"Douyin yt-dlp failed: {detail.strip()}\nBrowser fallback: {browser_exc}"
+                    ) from browser_exc
         raise MediaError(detail or "yt-dlp failed or source duration was outside the allowed range")
     candidates = sorted(
         p for p in output_dir.glob("source.*") if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
