@@ -8,7 +8,7 @@ from apps.api.services.job_store import job_store
 from apps.worker.celery_app import celery_app
 from apps.worker.services.audio import build_tts_manifest, extract_audio
 from apps.worker.services.audio_mix import mix_narration_with_background
-from apps.worker.services.media import download_video, validate_video
+from apps.worker.services.media import download_video, sha256_file, validate_video
 from apps.worker.services.qc import quality_gate
 from apps.worker.services.render import render_subtitles
 from apps.worker.services.subtitles import write_srt
@@ -53,6 +53,27 @@ def run_pipeline(self, job_id: str, source_url: str, target_language: str, min_d
         job_store.update(job_id, status=JobStatus.VALIDATING, progress=20, message="Checking media and duration")
         metadata = validate_video(source_path, min_seconds, max_seconds)
 
+        fingerprint = sha256_file(source_path)
+        existing = job_store.find_source_by_fingerprint(fingerprint)
+        if existing is not None and existing.job_id != job_id:
+            raise RuntimeError(f"Duplicate source media detected; already processed by job {existing.job_id}")
+        if existing is None:
+            try:
+                job_store.register_source_media(
+                    job_id=job_id,
+                    source_url=source_url,
+                    fingerprint=fingerprint,
+                    path=str(source_path),
+                    duration=metadata["duration"],
+                    width=metadata["width"],
+                    height=metadata["height"],
+                )
+            except Exception as exc:
+                existing = job_store.find_source_by_fingerprint(fingerprint)
+                if existing is not None and existing.job_id != job_id:
+                    raise RuntimeError(f"Duplicate source media detected; already processed by job {existing.job_id}") from exc
+                raise
+
         audio_path = job_dir / "source.wav"
         transcript_path = job_dir / "transcript.json"
         if not _artifact_ready(transcript_path):
@@ -85,6 +106,7 @@ def run_pipeline(self, job_id: str, source_url: str, target_language: str, min_d
         if not _artifact_ready(manifest_path):
             build_tts_manifest(translated, manifest_path)
 
+        job_store.update(job_id, status=JobStatus.SYNTHESIZING, progress=65, message="Generating Vietnamese narration")
         tts_dir = job_dir / "tts"
         narration_paths = synthesize_segments(EdgeTTSProvider(voice=settings.tts_voice, rate=settings.tts_rate), translated, tts_dir)
 
@@ -95,10 +117,12 @@ def run_pipeline(self, job_id: str, source_url: str, target_language: str, min_d
 
         final_path = job_dir / "final_vi.mp4"
         if not _artifact_ready(final_path):
+            job_store.update(job_id, status=JobStatus.RENDERING, progress=82, message="Burning Vietnamese subtitles")
             render_subtitles(narrated_path, subtitle_path, final_path)
 
         vertical_path = job_dir / "final_vi_9x16.mp4"
         if not _artifact_ready(vertical_path):
+            job_store.update(job_id, status=JobStatus.RENDERING, progress=90, message="Rendering 9:16 vertical output")
             render_vertical(final_path, vertical_path, settings.output_width, settings.output_height)
 
         job_store.update(job_id, status=JobStatus.QC, progress=95, message="Running final quality checks")
