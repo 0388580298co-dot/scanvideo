@@ -7,6 +7,7 @@ celery_app = Celery(
     "scanvideo",
     broker=os.getenv("REDIS_URL", "redis://redis:6379/0"),
     backend=os.getenv("REDIS_URL", "redis://redis:6379/0"),
+    include=["apps.worker.tasks.pipeline"],
 )
 
 celery_app.conf.update(
