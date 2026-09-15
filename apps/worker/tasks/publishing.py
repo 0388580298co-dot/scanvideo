@@ -6,7 +6,7 @@ from pathlib import Path
 
 from apps.api.core.config import settings
 from apps.api.db.base import SessionLocal
-from apps.api.db.models import Job, PlatformAccount, PublishedPost, ScheduledPost
+from apps.api.db.models import Job, PlatformAccount, PublishAttempt, PublishedPost, ScheduledPost
 from apps.worker.celery_app import celery_app
 from apps.worker.services.publishers.tiktok import TikTokPublisher
 from apps.worker.services.publishers.youtube import YouTubePublisher
@@ -51,6 +51,109 @@ def _publish(post: ScheduledPost, job: Job, account: PlatformAccount | None = No
     raise PublishingError(f"Unsupported platform: {post.platform}")
 
 
+def _publisher(account: PlatformAccount, platform: str):
+    credential_ref = _credential_path(account.credential_ref)
+    if platform == "youtube":
+        return YouTubePublisher(
+            Path(os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "/secrets/client_secret.json")),
+            credential_ref or Path(os.getenv("YOUTUBE_TOKEN_FILE", "/secrets/youtube_token.json")),
+        )
+    if platform == "tiktok":
+        return TikTokPublisher(token_file=credential_ref)
+    raise PublishingError(f"Unsupported platform: {platform}")
+
+
+def _snapshot(session, post_id: int):
+    post = session.get(ScheduledPost, post_id)
+    if post is None:
+        raise PublishingError("Scheduled post not found")
+    job = session.get(Job, post.job_id)
+    if job is None:
+        raise PublishingError("Job not found")
+    account = session.get(PlatformAccount, post.platform_account_id)
+    if account is None or not account.enabled or account.platform != post.platform:
+        raise PublishingError("Publishing account is missing or disabled")
+    return (
+        post.job_id,
+        post.platform,
+        post.title,
+        post.description,
+        post.privacy_level,
+        job.output_path,
+        account.id,
+        account.platform,
+        account.account_name,
+        account.credential_ref,
+    )
+
+
+def _finalize_published(session, post_id: int, job_id: str, platform: str, external_id: str, response: dict) -> None:
+    now = datetime.now(timezone.utc)
+    post = session.get(ScheduledPost, post_id)
+    job = session.get(Job, job_id)
+    attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+    if post is None or job is None:
+        raise PublishingError("Scheduled post disappeared during reconciliation")
+    if attempt:
+        attempt.status = "COMPLETE"
+        attempt.external_id = external_id
+        attempt.provider_status = "PUBLISH_COMPLETE"
+        attempt.error = None
+        attempt.updated_at = now
+    existing = session.query(PublishedPost).filter(PublishedPost.scheduled_post_id == post_id).first()
+    if not existing:
+        session.add(
+            PublishedPost(
+                scheduled_post_id=post_id,
+                platform=platform,
+                external_id=external_id,
+                published_at=now,
+                metrics={"response": response},
+            )
+        )
+    post.status = "PUBLISHED"
+    post.error = None
+    job.status = "PUBLISHED"
+    job.updated_at = now
+    session.commit()
+
+
+def _reconcile_existing(post_id: int) -> bool:
+    """Return True if an existing provider submission was safely finalized."""
+    with SessionLocal() as session:
+        snapshot = _snapshot(session, post_id)
+        job_id, platform, _, _, _, _, account_id, account_platform, account_name, credential_ref = snapshot
+        attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+        if not attempt or not attempt.external_id:
+            return False
+        account = PlatformAccount(
+            id=account_id,
+            platform=account_platform,
+            account_name=account_name,
+            credential_ref=credential_ref,
+            enabled=True,
+        )
+        provider = _publisher(account, platform)
+        if platform == "youtube":
+            existing = provider.lookup(attempt.external_id)
+            if existing:
+                _finalize_published(session, post_id, job_id, platform, attempt.external_id, existing)
+                return True
+            return False
+        status_payload = provider.publish_status(attempt.external_id)
+        status = str(status_payload.get("data", {}).get("status") or "").upper()
+        attempt.provider_status = status[:64] or None
+        attempt.updated_at = datetime.now(timezone.utc)
+        if status in {"PUBLISH_COMPLETE", "PUBLISHED", "COMPLETE"}:
+            _finalize_published(session, post_id, job_id, platform, attempt.external_id, status_payload)
+            return True
+        if status and status not in {"FAILED", "ERROR", "CANCELLED"}:
+            session.commit()
+            raise ConnectionError(f"{platform} publish still processing: {status}")
+        session.commit()
+        return False
+
+
 @celery_app.task(
     bind=True,
     name="scanvideo.publish_scheduled",
@@ -67,74 +170,51 @@ def publish_scheduled(self, post_id: int) -> dict:
             raise PublishingError("Scheduled post not found")
         if post.status != "PROCESSING":
             return {"post_id": post_id, "status": post.status}
-        job = session.get(Job, post.job_id)
-        if job is None:
-            raise PublishingError("Job not found")
-        account = session.get(PlatformAccount, post.platform_account_id)
-        if account is None or not account.enabled or account.platform != post.platform:
-            raise PublishingError("Publishing account is missing or disabled")
-        job_id = post.job_id
-        platform = post.platform
-        title = post.title
-        description = post.description
-        privacy = post.privacy_level
-        output_path = job.output_path
-        account_id = account.id
-        credential_ref = account.credential_ref
+        existing = session.query(PublishedPost).filter(PublishedPost.scheduled_post_id == post_id).first()
+        if existing:
+            return {"post_id": post_id, "status": "PUBLISHED", "external_id": existing.external_id}
+        attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
 
     try:
-        # Work from detached snapshots so SQLAlchemy sessions never cross the
-        # network/upload boundary.
-        snapshot = Job(id=job_id, source_url="", status="PUBLISHED", output_path=output_path)
-        post_snapshot = ScheduledPost(
-            id=post_id,
-            job_id=job_id,
-            platform=platform,
-            platform_account_id=account_id,
-            title=title,
-            description=description,
-            privacy_level=privacy,
-        )
-        account_snapshot = PlatformAccount(
-            id=account_id,
-            platform=platform,
-            account_name="configured",
-            credential_ref=credential_ref,
-            enabled=True,
-        )
-        result = _publish(post_snapshot, snapshot, account_snapshot)
-        external_id = str(result.get("id") or result.get("data", {}).get("publish_id") or "")
-        now = datetime.now(timezone.utc)
+        if attempt and attempt.external_id:
+            if _reconcile_existing(post_id):
+                return {"post_id": post_id, "status": "PUBLISHED", "external_id": attempt.external_id}
+
         with SessionLocal() as session:
-            db_post = session.get(ScheduledPost, post_id)
-            db_job = session.get(Job, job_id)
-            if db_post is None or db_job is None:
-                raise PublishingError("Scheduled post disappeared during publish")
-            existing = session.query(PublishedPost).filter(PublishedPost.scheduled_post_id == post_id).first()
-            if existing:
-                db_post.status = "PUBLISHED"
-                db_post.error = None
-                db_job.status = "PUBLISHED"
-                db_job.updated_at = now
-            else:
-                db_post.status = "PUBLISHED"
-                db_post.error = None
-                db_job.status = "PUBLISHED"
-                db_job.updated_at = now
-                session.add(
-                    PublishedPost(
-                        scheduled_post_id=post_id,
-                        platform=platform,
-                        external_id=external_id,
-                        published_at=now,
-                        metrics={"response": result},
-                    )
-                )
+            job_id, platform, title, description, privacy, output_path, account_id, account_platform, account_name, credential_ref = _snapshot(session, post_id)
+            if not output_path:
+                raise PublishingError("Job has no output media")
+            attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+            if attempt is None:
+                attempt = PublishAttempt(scheduled_post_id=post_id, platform=platform, status="STARTED")
+                session.add(attempt)
+                session.commit()
+            job_snapshot = Job(id=job_id, source_url="", status="PUBLISHED", output_path=output_path)
+            post_snapshot = ScheduledPost(id=post_id, job_id=job_id, platform=platform, title=title, description=description, privacy_level=privacy)
+            account_snapshot = PlatformAccount(id=account_id, platform=account_platform, account_name=account_name, credential_ref=credential_ref, enabled=True)
+
+        result = _publish(post_snapshot, job_snapshot, account_snapshot)
+        external_id = str(result.get("id") or result.get("data", {}).get("publish_id") or "")
+        if not external_id:
+            raise PublishingError("Provider returned no external publish identifier")
+
+        with SessionLocal() as session:
+            db_attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+            if db_attempt is None:
+                raise PublishingError("Publish attempt record disappeared during upload")
+            db_attempt.external_id = external_id
+            db_attempt.status = "SUBMITTED"
+            db_attempt.provider_status = "SUBMITTED"
+            db_attempt.error = None
+            db_attempt.updated_at = datetime.now(timezone.utc)
+            if platform == "youtube":
+                _finalize_published(session, post_id, job_id, platform, external_id, result)
+                return {"post_id": post_id, "status": "PUBLISHED", "external_id": external_id}
             session.commit()
-        return {"post_id": post_id, "status": "PUBLISHED", "external_id": external_id}
+
+        reconcile_publish.apply_async(args=[post_id], countdown=20)
+        return {"post_id": post_id, "status": "PROCESSING", "external_id": external_id}
     except (TimeoutError, ConnectionError) as exc:
-        # Celery will retry these transient failures. Do not mark the post
-        # permanently failed before the retry budget is exhausted.
         retries = getattr(self.request, "retries", 0)
         if retries >= self.max_retries:
             with SessionLocal() as session:
@@ -157,6 +237,43 @@ def publish_scheduled(self, post_id: int) -> dict:
                 db_post.status = "FAILED"
                 db_post.error = str(exc)[:4000]
                 session.commit()
+        raise
+
+
+@celery_app.task(bind=True, name="scanvideo.reconcile_publish", max_retries=10)
+def reconcile_publish(self, post_id: int) -> dict:
+    try:
+        with SessionLocal() as session:
+            post = session.get(ScheduledPost, post_id)
+            if post is None:
+                raise PublishingError("Scheduled post not found")
+            if post.status == "PUBLISHED":
+                return {"post_id": post_id, "status": "PUBLISHED"}
+        if _reconcile_existing(post_id):
+            return {"post_id": post_id, "status": "PUBLISHED"}
+        with SessionLocal() as session:
+            attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+            if attempt:
+                attempt.status = "FAILED"
+                attempt.error = "Provider reported a terminal failure"
+                session.commit()
+                post = session.get(ScheduledPost, post_id)
+                if post:
+                    post.status = "FAILED"
+                    post.error = attempt.error
+                    session.commit()
+        return {"post_id": post_id, "status": "FAILED"}
+    except ConnectionError as exc:
+        if self.request.retries >= self.max_retries:
+            with SessionLocal() as session:
+                post = session.get(ScheduledPost, post_id)
+                if post:
+                    post.status = "FAILED"
+                    post.error = str(exc)[:4000]
+                    session.commit()
+            raise
+        raise self.retry(exc=exc, countdown=min(60, 10 + self.request.retries * 5))
+    except Exception:
         raise
 
 
