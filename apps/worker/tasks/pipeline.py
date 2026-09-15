@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from apps.api.core.config import settings
 from apps.api.schemas.jobs import JobStatus
 from apps.api.services.job_store import job_store
@@ -10,14 +12,21 @@ from apps.worker.services.media import download_video, validate_video
 from apps.worker.services.qc import quality_gate
 from apps.worker.services.render import render_subtitles
 from apps.worker.services.subtitles import write_srt
-from apps.worker.services.transcription import WhisperTranscriber, save_transcript
-from apps.worker.services.translation import translate_segments
+from apps.worker.services.transcription import TranscriptSegment, WhisperTranscriber, save_transcript
+from apps.worker.services.translation import TranslationSegment, translate_segments
 from apps.worker.services.tts import EdgeTTSProvider, synthesize_segments
 from apps.worker.services.vertical import render_vertical
 
 
 def _artifact_ready(path) -> bool:
     return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def _load_transcript(path):
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return None, [TranscriptSegment(**item) for item in payload]
+    return payload.get("language"), [TranscriptSegment(**item) for item in payload.get("segments", [])]
 
 
 @celery_app.task(
@@ -50,24 +59,26 @@ def run_pipeline(self, job_id: str, source_url: str, target_language: str, min_d
             job_store.update(job_id, status=JobStatus.TRANSCRIBING, progress=30, message="Transcribing source audio")
             if not _artifact_ready(audio_path):
                 extract_audio(source_path, audio_path)
-            segments = WhisperTranscriber(model_size=settings.whisper_model).transcribe(audio_path)
+            transcriber = WhisperTranscriber(model_size=settings.whisper_model)
+            segments = transcriber.transcribe(audio_path)
             if not segments:
                 raise RuntimeError("No speech segments were detected")
-            save_transcript(segments, transcript_path)
+            source_language = transcriber.detected_language or "en"
+            save_transcript(segments, transcript_path, source_language)
         else:
-            import json
-            from apps.worker.services.transcription import TranscriptSegment
-            segments = [TranscriptSegment(**item) for item in json.loads(transcript_path.read_text(encoding="utf-8"))]
+            source_language, segments = _load_transcript(transcript_path)
+            source_language = source_language or "en"
+            if not segments:
+                raise RuntimeError("Cached transcript contains no valid segments")
 
         translation_path = job_dir / f"translation.{target_language}.json"
         subtitle_path = job_dir / f"subtitles.{target_language}.srt"
         if _artifact_ready(translation_path):
-            import json
-            from apps.worker.services.translation import TranslationSegment
-            translated = [TranslationSegment(**item) for item in json.loads(translation_path.read_text(encoding="utf-8"))["segments"]]
+            payload = json.loads(translation_path.read_text(encoding="utf-8"))
+            translated = [TranslationSegment(**item) for item in payload["segments"]]
         else:
-            job_store.update(job_id, status=JobStatus.TRANSLATING, progress=55, message=f"Translating to {target_language}")
-            translated = translate_segments(segments, target_language, translation_path)
+            job_store.update(job_id, status=JobStatus.TRANSLATING, progress=55, message=f"Translating {source_language} to {target_language}")
+            translated = translate_segments(segments, target_language, translation_path, source_language=source_language)
         if not _artifact_ready(subtitle_path):
             write_srt(translated, subtitle_path)
         manifest_path = job_dir / "tts_manifest.json"

@@ -18,6 +18,7 @@ class WhisperTranscriber:
         self.model_size = model_size
         self.device = device
         self._model = None
+        self.detected_language: str | None = None
 
     def _load(self):
         if self._model is None:
@@ -36,24 +37,16 @@ class WhisperTranscriber:
 
     def transcribe(self, media_path: Path, language: str | None = None) -> list[TranscriptSegment]:
         model = self._load()
-        segments, _ = model.transcribe(
-            str(media_path),
-            language=language,
-            vad_filter=True,
-            condition_on_previous_text=False,
-        )
+        segments, info = model.transcribe(str(media_path), language=language, vad_filter=True, condition_on_previous_text=False)
+        self.detected_language = getattr(info, "language", None)
         return [
             TranscriptSegment(float(s.start), float(s.end), s.text.strip())
             for s in segments
-            if s.text.strip()
+            if s.text.strip() and float(s.end) > float(s.start) >= 0
         ]
 
 
-def save_transcript(segments: list[TranscriptSegment], path: Path) -> None:
+def save_transcript(segments: list[TranscriptSegment], path: Path, language: str | None = None) -> None:
     import json
-
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(segment) for segment in segments], ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps({"language": language, "segments": [asdict(s) for s in segments]}, ensure_ascii=False, indent=2), encoding="utf-8")
