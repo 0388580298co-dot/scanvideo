@@ -2,14 +2,16 @@ from fastapi import FastAPI
 
 from apps.api.routes.dashboard import router as dashboard_router
 from apps.api.routes.jobs import router as jobs_router
+from apps.api.routes.schedule import router as schedule_router
 
 app = FastAPI(
     title="ScanVideo API",
-    version="0.1.0",
+    version="0.3.0",
     description="AI-first short-video localization and publishing platform",
 )
 
 app.include_router(jobs_router)
+app.include_router(schedule_router)
 app.include_router(dashboard_router, prefix="/api/v1")
 
 
@@ -20,4 +22,4 @@ def health() -> dict[str, str]:
 
 @app.get("/api/v1")
 def api_info() -> dict[str, str]:
-    return {"name": "ScanVideo", "version": "0.1.0", "status": "pipeline-ready"}
+    return {"name": "ScanVideo", "version": "0.3.0", "status": "pipeline-ready"}
