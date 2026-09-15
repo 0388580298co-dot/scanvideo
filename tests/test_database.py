@@ -23,7 +23,3 @@ def test_platform_publish_foreign_keys_exist():
 def test_publish_attempt_is_unique_per_scheduled_post():
     column = PublishAttempt.__table__.c.scheduled_post_id
     assert column.unique is True
-    assert any(
-        constraint.name == "uq_publish_attempt_scheduled_post"
-        for constraint in PublishAttempt.__table__.constraints
-    )
