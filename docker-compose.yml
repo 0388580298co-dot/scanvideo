@@ -10,7 +10,7 @@ services:
     volumes:
       - .:/workspace
       - media_data:/data/media
-      - secrets_data:/secrets:ro
+      - ./.secrets:/secrets
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -24,7 +24,7 @@ services:
     volumes:
       - .:/workspace
       - media_data:/data/media
-      - secrets_data:/secrets
+      - ./.secrets:/secrets
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -75,4 +75,3 @@ services:
 volumes:
   postgres_data:
   media_data:
-  secrets_data:
