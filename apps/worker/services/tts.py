@@ -44,7 +44,10 @@ def fit_audio_to_duration(source: Path, output: Path, duration: float) -> Path:
     )
     if probe.returncode != 0:
         raise MediaError("Unable to probe TTS duration")
-    actual = float(probe.stdout.strip() or 0)
+    try:
+        actual = float(probe.stdout.strip() or 0)
+    except ValueError as exc:
+        raise MediaError("Invalid TTS duration returned by ffprobe") from exc
     if actual <= 0:
         raise MediaError("Invalid TTS duration")
     ratio = actual / duration
@@ -63,16 +66,25 @@ def fit_audio_to_duration(source: Path, output: Path, duration: float) -> Path:
     )
     if result.returncode != 0:
         raise MediaError(result.stderr[-4000:] or "Unable to fit TTS audio")
+    if not output.exists() or output.stat().st_size == 0:
+        raise MediaError("TTS fitting produced no audio")
     return output
 
 
-def synthesize_segments(provider: TTSProvider, segments: list[TranslationSegment], output_dir: Path) -> list[Path]:
+def synthesize_segments(
+    provider: TTSProvider,
+    segments: list[TranslationSegment],
+    output_dir: Path,
+) -> list[Path]:
+    """Synthesize segments resumably; valid existing artifacts are reused."""
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for index, segment in enumerate(segments):
         raw = output_dir / f"tts_{index:04d}.mp3"
         fitted = output_dir / f"tts_{index:04d}_fit.wav"
-        provider.synthesize(segment.translated_text, raw)
-        fit_audio_to_duration(raw, fitted, segment.end - segment.start)
+        if not raw.exists() or raw.stat().st_size == 0:
+            provider.synthesize(segment.translated_text, raw)
+        if not fitted.exists() or fitted.stat().st_size == 0:
+            fit_audio_to_duration(raw, fitted, segment.end - segment.start)
         paths.append(fitted)
     return paths
