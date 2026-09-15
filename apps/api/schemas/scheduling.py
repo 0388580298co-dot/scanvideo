@@ -10,7 +10,7 @@ class ScheduleCreateRequest(BaseModel):
     scheduled_at: datetime
     title: str = Field(default="", max_length=2200)
     description: str = Field(default="", max_length=5000)
-    privacy_level: str = "SELF_ONLY"
+    privacy_level: str | None = None
     account_id: int | None = None
 
 
