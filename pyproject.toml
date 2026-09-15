@@ -1,6 +1,6 @@
 [project]
 name = "scanvideo"
-version = "0.3.0"
+version = "0.4.0"
 description = "AI-first short-video localization and publishing platform"
 requires-python = ">=3.12,<3.14"
 dependencies = [
