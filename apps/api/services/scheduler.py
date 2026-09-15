@@ -90,8 +90,18 @@ class SchedulerService:
             post.status = "CANCELLED"
             job = session.get(Job, post.job_id)
             if job and job.status == "SCHEDULED":
-                job.status = "COMPLETED"
-                job.updated_at = datetime.now(timezone.utc)
+                remaining = session.scalar(
+                    select(ScheduledPost.id)
+                    .where(
+                        ScheduledPost.job_id == post.job_id,
+                        ScheduledPost.status.in_(["SCHEDULED", "PROCESSING"]),
+                        ScheduledPost.id != post.id,
+                    )
+                    .limit(1)
+                )
+                if remaining is None:
+                    job.status = "COMPLETED"
+                    job.updated_at = datetime.now(timezone.utc)
             session.commit()
             session.refresh(post)
             return self._response(post)
