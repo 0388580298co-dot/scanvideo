@@ -29,7 +29,7 @@ class ConfiguredFeedTrendProvider:
         self.items = items or []
 
     def discover(self, limit: int = 20) -> list[TrendItem]:
-        return rank_trends(self.items)[:limit]
+        return rank_trends(self.items)[:max(0, limit)]
 
 
 class RssTrendProvider:
@@ -59,13 +59,16 @@ class RssTrendProvider:
                 )
                 response.raise_for_status()
                 items.extend(self._parse(response.content, feed_url))
-            except requests.RequestException:
+            except (requests.RequestException, ET.ParseError):
                 continue
-        return rank_trends(items)[:limit]
+        return rank_trends(items)[:max(0, limit)]
 
     @staticmethod
     def _parse(payload: bytes, feed_url: str) -> list[TrendItem]:
-        root = ET.fromstring(payload)
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError:
+            return []
         source = urlparse(feed_url).netloc or "rss"
         items: list[TrendItem] = []
         for node in root.iter():
