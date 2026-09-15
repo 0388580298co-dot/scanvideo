@@ -53,3 +53,14 @@ def disable_account(account_id: int) -> AccountResponse:
         row.enabled = False
         session.commit()
         return AccountResponse(id=row.id, platform=row.platform, account_name=row.account_name, enabled=row.enabled)
+
+
+@router.post("/{account_id}/enable", response_model=AccountResponse)
+def enable_account(account_id: int) -> AccountResponse:
+    with SessionLocal() as session:
+        row = session.get(PlatformAccount, account_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Account not found")
+        row.enabled = True
+        session.commit()
+        return AccountResponse(id=row.id, platform=row.platform, account_name=row.account_name, enabled=row.enabled)
