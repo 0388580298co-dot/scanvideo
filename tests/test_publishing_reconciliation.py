@@ -92,10 +92,8 @@ def test_tiktok_processing_state_is_retryable(monkeypatch):
     assert attempt.provider_status == "PROCESSING_UPLOAD"
 
 
-def test_publish_attempt_claim_race_is_not_a_failure(monkeypatch):
+def test_publish_attempt_claim_race_is_not_a_failure():
     """A unique-constraint race means another worker owns the post, not that publishing failed."""
-
-    winner = FakeAttempt(external_id=None)
 
     class RaceSession:
         def __init__(self):
@@ -104,26 +102,23 @@ def test_publish_attempt_claim_race_is_not_a_failure(monkeypatch):
             self.commits = 0
 
         def query(self, model):
-            return FakeQuery(None if self.commits == 0 else winner)
+            return FakeQuery(None)
 
         def add(self, value):
             self.added = value
 
         def commit(self):
             self.commits += 1
-            if self.commits == 1:
-                raise IntegrityError("INSERT", {}, Exception("duplicate scheduled post"))
+            raise IntegrityError("INSERT", {}, Exception("duplicate scheduled post"))
 
         def rollback(self):
             self.rolled_back = True
 
     session = RaceSession()
-    monkeypatch.setattr(publishing, "PublishAttempt", lambda **kwargs: kwargs)
-
     claimed = publishing._claim_publish_attempt(session, 42, "tiktok")
 
     assert claimed is None
     assert session.rolled_back is True
     assert session.commits == 1
-    assert session.added["scheduled_post_id"] == 42
-    assert session.added["platform"] == "tiktok"
+    assert session.added.scheduled_post_id == 42
+    assert session.added.platform == "tiktok"
