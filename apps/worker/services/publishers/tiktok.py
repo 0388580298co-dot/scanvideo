@@ -8,6 +8,8 @@ from pathlib import Path
 
 import requests
 
+from apps.worker.services.media import MediaError, probe_video
+
 
 API = "https://open.tiktokapis.com/v2"
 TOKEN_URL = f"{API}/oauth/token/"
@@ -114,6 +116,23 @@ class TikTokPublisher:
             raise ValueError("TikTok privacy_level must be explicitly selected")
         if privacy_level not in privacy_options:
             raise ValueError(f"TikTok privacy level is not available: {privacy_level}")
+
+        max_duration = creator.get("max_video_post_duration_sec")
+        if max_duration is not None:
+            try:
+                max_duration = float(max_duration)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("TikTok returned an invalid maximum video duration") from exc
+            if max_duration <= 0:
+                raise RuntimeError("TikTok returned an invalid maximum video duration")
+            try:
+                duration = float(probe_video(video_path)["duration"])
+            except (KeyError, TypeError, ValueError, MediaError) as exc:
+                raise RuntimeError("Unable to determine video duration before TikTok upload") from exc
+            if duration > max_duration + 0.05:
+                raise ValueError(
+                    f"Video duration {duration:.2f}s exceeds TikTok creator limit {max_duration:.2f}s"
+                )
 
         size = video_path.stat().st_size
         chunk = size if size <= 5_000_000 else min(size, 10_000_000)
