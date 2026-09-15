@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -16,6 +17,7 @@ from apps.api.db.models import PlatformAccount
 
 router = APIRouter(prefix="/api/v1/oauth", tags=["oauth"])
 STATE_DIR = settings.secret_root / "oauth"
+STATE_TTL_SECONDS = 10 * 60
 
 
 def _state_file(platform: str, state: str) -> Path:
@@ -29,16 +31,31 @@ def _state_file(platform: str, state: str) -> Path:
 def _save_state(platform: str, state: str) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     path = _state_file(platform, state)
-    path.write_text(state, encoding="utf-8")
+    path.write_text(
+        json.dumps({"state": state, "created_at": time.time()}),
+        encoding="utf-8",
+    )
 
 
 def _consume_state(platform: str, state: str) -> None:
-    """Validate and consume exactly one OAuth flow without affecting other flows."""
+    """Validate, expire, and consume exactly one OAuth flow without affecting other flows."""
     path = _state_file(platform, state)
-    expected = path.read_text(encoding="utf-8") if path.exists() else ""
-    if not expected or not secrets.compare_digest(expected, state):
-        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+
+    try:
+        created_at = float(payload.get("created_at", 0))
+    except (TypeError, ValueError):
+        created_at = 0
+
+    expected = payload.get("state", "")
+    expired = not created_at or time.time() - created_at > STATE_TTL_SECONDS
+    valid = isinstance(expected, str) and secrets.compare_digest(expected, state) and not expired
     path.unlink(missing_ok=True)
+    if not valid:
+        raise HTTPException(status_code=400, detail="Invalid or expired OAuth state")
 
 
 def _ensure_account(platform: str, name: str, credential_ref: str) -> None:
@@ -142,7 +159,10 @@ def tiktok_callback(code: str = Query(...), state: str = Query(...)) -> dict:
     )
     if response.status_code >= 400:
         raise HTTPException(status_code=502, detail="TikTok OAuth token exchange failed")
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="TikTok OAuth returned invalid JSON") from exc
     token_path = settings.secret_root / "oauth" / "tiktok_token.json"
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
