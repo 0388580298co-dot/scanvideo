@@ -23,7 +23,14 @@ def test_audio_mix_builds_delayed_narration_and_limiter(monkeypatch, tmp_path):
         return Result()
 
     monkeypatch.setattr("apps.worker.services.audio_mix.subprocess.run", fake_run)
-    segments = [TranslationSegment(start=1.25, end=2.5, text="Xin chào")]
+    segments = [
+        TranslationSegment(
+            start=1.25,
+            end=2.5,
+            source_text="Hello",
+            translated_text="Xin chào",
+        )
+    ]
 
     result = mix_narration_with_background(source, [narration], segments, output)
 
@@ -39,7 +46,12 @@ def test_audio_mix_rejects_mismatched_inputs(tmp_path):
     source = tmp_path / "source.mp4"
     source.write_bytes(b"source")
     output = tmp_path / "mixed.mp4"
-    segment = TranslationSegment(start=0, end=1, text="Xin chào")
+    segment = TranslationSegment(
+        start=0,
+        end=1,
+        source_text="Hello",
+        translated_text="Xin chào",
+    )
 
     with pytest.raises(MediaError):
         mix_narration_with_background(source, [], [segment], output)
