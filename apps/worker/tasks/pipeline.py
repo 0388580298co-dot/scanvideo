@@ -73,7 +73,11 @@ def run_pipeline(self, job_id: str, source_url: str, target_language: str, min_d
             job_store.update(job_id, status=JobStatus.TRANSCRIBING, progress=30, message="Transcribing source audio")
             if not _artifact_ready(audio_path):
                 extract_audio(source_path, audio_path)
-            transcriber = WhisperTranscriber(model_size=settings.whisper_model)
+            transcriber = WhisperTranscriber(
+                model_size=settings.whisper_model,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute_type,
+            )
             segments = transcriber.transcribe(audio_path)
             if not segments:
                 raise RuntimeError("No speech segments were detected")
