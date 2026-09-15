@@ -13,6 +13,7 @@ from apps.worker.services.subtitles import write_srt
 from apps.worker.services.transcription import WhisperTranscriber, save_transcript
 from apps.worker.services.translation import translate_segments
 from apps.worker.services.tts import EdgeTTSProvider, synthesize_segments
+from apps.worker.services.vertical import render_vertical
 
 
 @celery_app.task(bind=True, name="scanvideo.run_pipeline", autoretry_for=(Exception,), retry_backoff=True, max_retries=2)
@@ -49,7 +50,7 @@ def run_pipeline(
         subtitle_path = write_srt(translated, job_dir / f"subtitles.{target_language}.srt")
         build_tts_manifest(translated, job_dir / "tts_manifest.json")
 
-        job_store.update(job_id, status=JobStatus.SYNTHESIZING, progress=65, message="Generating timing-safe Vietnamese narration")
+        job_store.update(job_id, status=JobStatus.SYNTHESIZING, progress=65, message="Generating timing-safe narration")
         tts_dir = job_dir / "tts"
         voice = getattr(settings, "tts_voice", "vi-VN-HoaiMyNeural")
         rate = getattr(settings, "tts_rate", "+0%")
@@ -69,8 +70,11 @@ def run_pipeline(
         final_path = job_dir / "final_vi.mp4"
         render_subtitles(narrated_path, subtitle_path, final_path)
 
+        vertical_path = job_dir / "final_vi_9x16.mp4"
+        render_vertical(final_path, vertical_path)
+
         job_store.update(job_id, status=JobStatus.QC, progress=95, message="Running final quality checks")
-        qc = quality_gate(final_path, expected_min_duration=max(1.0, min_seconds))
+        qc = quality_gate(vertical_path, expected_min_duration=max(1.0, min_seconds))
         if not qc.get("passed"):
             raise RuntimeError(f"Quality gate failed: {qc}")
 
@@ -78,8 +82,8 @@ def run_pipeline(
             job_id,
             status=JobStatus.COMPLETED,
             progress=100,
-            message="Localized video rendered and QC passed",
-            output_path=str(final_path),
+            message="Localized vertical video rendered and QC passed",
+            output_path=str(vertical_path),
         )
         return {
             "job_id": job_id,
@@ -90,6 +94,7 @@ def run_pipeline(
             "tts_manifest": str(job_dir / "tts_manifest.json"),
             "narrated_video": str(narrated_path),
             "output": str(final_path),
+            "vertical_output": str(vertical_path),
             "metadata": metadata,
             "qc": qc,
         }
