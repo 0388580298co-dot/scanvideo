@@ -99,8 +99,13 @@ class ScheduledPost(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
     platform_account_id: Mapped[int] = mapped_column(ForeignKey("platform_accounts.id", ondelete="CASCADE"))
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    title: Mapped[str] = mapped_column(String(2200), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    privacy_level: Mapped[str] = mapped_column(String(64), default="SELF_ONLY")
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    status: Mapped[str] = mapped_column(String(32), default="SCHEDULED")
+    status: Mapped[str] = mapped_column(String(32), default="SCHEDULED", index=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PublishedPost(Base):
