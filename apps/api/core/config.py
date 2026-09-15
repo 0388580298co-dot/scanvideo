@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
+    cors_origins: list[str] = ["http://localhost:3000"]
     redis_url: str = "redis://redis:6379/0"
     database_url: str = "postgresql+psycopg://scanvideo:scanvideo@postgres:5432/scanvideo"
     media_root: Path = Path("/data/media")
@@ -15,6 +16,8 @@ class Settings(BaseSettings):
     min_video_duration: float = Field(default=10.0, ge=0)
     max_video_duration: float = Field(default=180.0, gt=0)
     whisper_model: str = "small"
+    whisper_device: str = "auto"
+    whisper_compute_type: str = "auto"
     translation_provider: str = "argos"
     tts_provider: str = "edge"
     tts_voice: str = "vi-VN-HoaiMyNeural"
@@ -29,7 +32,12 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     elevenlabs_api_key: str = ""
     youtube_access_token: str = ""
+    youtube_client_secrets_file: Path = Path("/secrets/client_secret.json")
+    youtube_token_file: Path = Path("/secrets/youtube_token.json")
     tiktok_access_token: str = ""
+    tiktok_client_key: str = ""
+    tiktok_client_secret: str = ""
+    tiktok_redirect_uri: str = "http://localhost:8000/api/v1/oauth/tiktok/callback"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
