@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlencode
@@ -28,12 +30,26 @@ def _state_file(platform: str, state: str) -> Path:
     return STATE_DIR / f"{platform}_{safe_state}.state"
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    """Write credentials/state atomically so a crash cannot leave a truncated secret file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def _save_state(platform: str, state: str) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _state_file(platform, state)
-    path.write_text(
+    _atomic_write(
+        _state_file(platform, state),
         json.dumps({"state": state, "created_at": time.time()}),
-        encoding="utf-8",
     )
 
 
@@ -116,8 +132,7 @@ def youtube_callback(code: str = Query(...), state: str = Query(...)) -> dict:
         redirect_uri=settings.youtube_redirect_uri,
     )
     flow.fetch_token(code=code)
-    settings.youtube_token_file.parent.mkdir(parents=True, exist_ok=True)
-    settings.youtube_token_file.write_text(flow.credentials.to_json(), encoding="utf-8")
+    _atomic_write(settings.youtube_token_file, flow.credentials.to_json())
     _ensure_account("youtube", "YouTube OAuth account", str(settings.youtube_token_file))
     return {
         "status": "connected",
@@ -164,8 +179,7 @@ def tiktok_callback(code: str = Query(...), state: str = Query(...)) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=502, detail="TikTok OAuth returned invalid JSON") from exc
     token_path = settings.secret_root / "oauth" / "tiktok_token.json"
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    _atomic_write(token_path, json.dumps(payload, ensure_ascii=False))
     _ensure_account("tiktok", "TikTok OAuth account", str(token_path))
     return {
         "status": "connected",
