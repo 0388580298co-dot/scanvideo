@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +22,7 @@ class YouTubePublisher:
         from google_auth_oauthlib.flow import Flow
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaFileUpload
+        from apps.api.core.config import settings
 
         scopes = ["https://www.googleapis.com/auth/youtube.upload"]
         creds = None
@@ -33,8 +35,8 @@ class YouTubePublisher:
                 if not self.credentials_file.exists():
                     raise RuntimeError("YouTube OAuth client_secret.json is missing")
                 flow = Flow.from_client_secrets_file(str(self.credentials_file), scopes=scopes)
-                flow.redirect_uri = "http://localhost:8000/api/v1/oauth/youtube/callback"
-                url, state = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
+                flow.redirect_uri = settings.youtube_redirect_uri
+                url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", prompt="consent")
                 raise RuntimeError(f"YouTube OAuth required. Open {url} then retry the publish job.")
             self.token_file.parent.mkdir(parents=True, exist_ok=True)
             self.token_file.write_text(creds.to_json(), encoding="utf-8")
