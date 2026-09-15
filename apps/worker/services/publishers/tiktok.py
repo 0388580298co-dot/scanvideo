@@ -80,17 +80,52 @@ class TikTokPublisher:
             timeout=30,
         )
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        error = payload.get("error", {})
+        if error.get("code") not in (None, "ok"):
+            raise RuntimeError(error.get("message", "TikTok creator info query failed"))
+        return payload.get("data", payload)
 
-    def publish_file(self, video_path: Path, title: str, privacy_level: str = "SELF_ONLY") -> dict:
+    def publish_status(self, publish_id: str) -> dict:
+        if not publish_id:
+            raise ValueError("publish_id is required")
+        response = requests.post(
+            f"{API}/post/publish/status/fetch/",
+            headers={"Authorization": f"Bearer {self.access_token}", "Content-Type": "application/json"},
+            json={"publish_id": publish_id},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        error = payload.get("error", {})
+        if error.get("code") not in (None, "ok"):
+            raise RuntimeError(error.get("message", "TikTok publish status query failed"))
+        return payload
+
+    def publish_file(self, video_path: Path, title: str, privacy_level: str | None = None) -> dict:
         if not video_path.exists() or video_path.stat().st_size == 0:
             raise RuntimeError("TikTok upload file is missing or empty")
+
+        creator = self.creator_info()
+        privacy_options = creator.get("privacy_level_options") or []
+        if not privacy_options:
+            raise RuntimeError("TikTok returned no available privacy levels")
+        if privacy_level is None:
+            raise ValueError("TikTok privacy_level must be explicitly selected")
+        if privacy_level not in privacy_options:
+            raise ValueError(f"TikTok privacy level is not available: {privacy_level}")
+
         size = video_path.stat().st_size
-        chunk = min(size, 10_000_000)
+        chunk = size if size <= 5_000_000 else min(size, 10_000_000)
         total = max(1, math.ceil(size / chunk))
         payload = {
             "post_info": {"title": title[:2200], "privacy_level": privacy_level},
-            "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": chunk, "total_chunk_count": total},
+            "source_info": {
+                "source": "FILE_UPLOAD",
+                "video_size": size,
+                "chunk_size": chunk,
+                "total_chunk_count": total,
+            },
         }
         response = requests.post(
             f"{API}/post/publish/video/init/",
@@ -103,22 +138,25 @@ class TikTokPublisher:
         if result.get("error", {}).get("code") not in (None, "ok"):
             raise RuntimeError(result.get("error", {}).get("message", "TikTok publish initialization failed"))
         upload_url = result.get("data", {}).get("upload_url")
-        if upload_url:
-            with video_path.open("rb") as handle:
-                offset = 0
-                while offset < size:
-                    data = handle.read(chunk)
-                    end = offset + len(data) - 1
-                    upload = requests.put(
-                        upload_url,
-                        headers={
-                            "Content-Type": "video/mp4",
-                            "Content-Length": str(len(data)),
-                            "Content-Range": f"bytes {offset}-{end}/{size}",
-                        },
-                        data=data,
-                        timeout=120,
-                    )
-                    upload.raise_for_status()
-                    offset += len(data)
+        publish_id = result.get("data", {}).get("publish_id")
+        if not upload_url or not publish_id:
+            raise RuntimeError("TikTok publish initialization returned no upload URL or publish ID")
+
+        with video_path.open("rb") as handle:
+            offset = 0
+            while offset < size:
+                data = handle.read(chunk)
+                end = offset + len(data) - 1
+                upload = requests.put(
+                    upload_url,
+                    headers={
+                        "Content-Type": "video/mp4",
+                        "Content-Length": str(len(data)),
+                        "Content-Range": f"bytes {offset}-{end}/{size}",
+                    },
+                    data=data,
+                    timeout=120,
+                )
+                upload.raise_for_status()
+                offset += len(data)
         return result
