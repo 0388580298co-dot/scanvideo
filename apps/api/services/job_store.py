@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -8,18 +10,23 @@ from apps.api.schemas.jobs import CreateJobRequest, JobResponse, JobStatus
 
 
 class JobStore:
+    """Development job store; repository persistence will move to PostgreSQL in Phase 2."""
+
     def __init__(self, root: Path) -> None:
         self.root = root / "jobs"
         self.root.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
 
     def create(self, request: CreateJobRequest) -> JobResponse:
-        import uuid
+        now = datetime.now(timezone.utc)
         job = JobResponse(
             job_id=uuid.uuid4().hex,
             status=JobStatus.QUEUED,
             source_url=request.source_url,
             target_language=request.target_language,
+            auto_publish=request.auto_publish,
+            created_at=now,
+            updated_at=now,
             message="Job queued",
         )
         self._write(job)
@@ -36,7 +43,7 @@ class JobStore:
         for path in sorted(self.root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 result.append(JobResponse.model_validate_json(path.read_text(encoding="utf-8")).model_dump(mode="json"))
-            except Exception:
+            except (OSError, ValueError, TypeError):
                 continue
         return result
 
@@ -45,12 +52,16 @@ class JobStore:
             current = self.get(job_id)
             if current is None:
                 raise KeyError(job_id)
+            changes["updated_at"] = datetime.now(timezone.utc)
             updated = current.model_copy(update=changes)
             self._write(updated)
             return updated
 
     def _write(self, job: JobResponse) -> None:
-        (self.root / f"{job.job_id}.json").write_text(job.model_dump_json(indent=2), encoding="utf-8")
+        target = self.root / f"{job.job_id}.json"
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(job.model_dump_json(indent=2), encoding="utf-8")
+        temporary.replace(target)
 
 
 job_store = JobStore(settings.media_root)

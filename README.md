@@ -2,146 +2,123 @@
 
 > AI-first short-video localization and publishing platform.
 
-ScanVideo is designed to turn a source short video into a localized Vietnamese short-form package through an observable pipeline:
+ScanVideo turns legally usable source media into a Vietnamese short-form package through an observable, resumable pipeline:
 
-**Discover → Acquire → Inspect → Transcribe → Translate → Rewrite → Voice → Render → Quality Gate → Schedule → Publish → Analyze**
+**Discover → Acquire → Validate → Transcribe → Translate → Rewrite → Voice → Render → QC → Schedule → Publish → Analyze**
 
-The project targets creator workflows for legally usable content and platform-approved publishing APIs. It is intentionally designed with provider adapters so one platform or model can be replaced without rewriting the pipeline.
+## Current status
 
-## Core goals
+The repository is currently in **Phase 1 / core pipeline hardening**. The API, Celery/Redis foundation, media validation, timestamp-preserving local translation adapter, Edge TTS, subtitle/rendering services, vertical output, QC, and development job store exist. PostgreSQL persistence, dashboard UI, full scheduler, and production publishing flows remain subsequent phases.
 
-- Discover short-form trends from configurable sources.
-- Acquire videos through provider adapters.
-- Reject unsuitable inputs early (duration, format, duplicates, quality).
-- Transcribe speech with word/segment timestamps.
-- Translate and rewrite naturally into Vietnamese.
-- Generate synchronized Vietnamese narration and subtitles.
-- Preserve useful background audio where possible.
-- Render platform-specific variants (9:16, captions, bitrate, duration).
-- Score quality before publishing.
-- Schedule and publish through official APIs/adapters where supported.
-- Track every job, artifact, API attempt and failure for retry/resume.
+## $0 AI API design
 
-## Important design principle
+The default pipeline does not require OpenAI, Gemini, Claude, or ElevenLabs API keys.
 
-ScanVideo does **not** treat downloading and reposting as the same thing as publishing. Source licensing/permission and each platform's terms must be respected. The pipeline includes a source-rights field and a human/automatic quality gate before publishing.
+- ASR: `faster-whisper`
+- Translation: `Argos Translate` (local model required)
+- TTS: `edge-tts`
+- Metadata: deterministic `TemplateContentGenerator`
+- Media: FFmpeg/ffprobe
+
+Optional commercial providers must remain optional and are never imported by the default local translation path.
 
 ## Architecture
 
 ```text
-                    ┌──────────────────────────┐
-                    │       ScanVideo Web       │
-                    │ Dashboard / Jobs / Queue  │
-                    └────────────┬─────────────┘
-                                 │ REST/WebSocket
-                    ┌────────────▼─────────────┐
-                    │       FastAPI API         │
-                    └────────────┬─────────────┘
-                                 │
-              ┌──────────────────┼──────────────────┐
-              │                  │                  │
-      ┌───────▼───────┐  ┌──────▼──────┐  ┌──────▼───────┐
-      │ PostgreSQL     │  │ Redis Queue │  │ Object Store │
-      │ metadata/jobs  │  │ workers     │  │ media/artifacts│
-      └────────────────┘  └──────┬──────┘  └──────────────┘
-                                  │
-        ┌─────────────────────────┼─────────────────────────┐
-        │                         │                         │
- ┌──────▼──────┐          ┌───────▼──────┐          ┌──────▼──────┐
- │ Acquisition │          │ AI Pipeline  │          │ Publishing  │
- │ adapters    │          │ ASR/TL/TTS   │          │ adapters    │
- └─────────────┘          │ FFmpeg/QC    │          └─────────────┘
-                          └──────────────┘
+Dashboard / client
+       ↓ REST
+     FastAPI
+       ↓
+ Redis + Celery ───── PostgreSQL (Phase 2)
+       ↓
+ Download → Validate → Whisper → Argos → TTS → Mix → SRT → 9:16 → QC
+       ↓
+ Official YouTube / TikTok publisher adapters
 ```
 
-## Planned stack
-
-- Backend: Python 3.12 + FastAPI
-- Queue: Redis + Celery initially; abstraction kept open for another worker later
-- Database: PostgreSQL + SQLAlchemy/Alembic
-- Media: FFmpeg/ffprobe
-- ASR: faster-whisper
-- Translation: provider abstraction (local/API)
-- TTS: provider abstraction (local/API)
-- Optional voice/background processing: Demucs + diarization
-- Frontend: Next.js + TypeScript
-- Deployment: Docker Compose first, then GPU worker deployment
-- CI: GitHub Actions
-
-## Pipeline states
-
-`DISCOVERED → DOWNLOADED → VALIDATED → TRANSCRIBED → TRANSLATED → SCRIPTED → TTS_READY → RENDERED → QC_PASSED → SCHEDULED → PUBLISHED`
-
-Any stage can become `FAILED` and resume from the last successful checkpoint.
+Provider boundaries are kept in `apps/worker/services` so ASR, translation, TTS, download, and publishing implementations can be replaced without rewriting orchestration.
 
 ## Repository layout
 
 ```text
 scanvideo/
-├── apps/
-│   ├── api/                 # FastAPI application
-│   ├── worker/              # asynchronous media/AI workers
-│   └── web/                 # Next.js dashboard (phase 2)
-├── packages/
-│   └── shared/              # shared schemas/contracts
-├── infra/
-│   ├── docker/
-│   └── migrations/
-├── docs/
-│   ├── architecture.md
-│   └── pipeline.md
-├── tests/
+├── apps/api/                 # FastAPI API, schemas, development job store
+├── apps/worker/              # Celery tasks and media/AI providers
+├── docs/                     # Architecture, pipeline, local AI and security notes
+├── infra/docker/             # Docker image
+├── tests/                    # Fast unit tests
 ├── .env.example
 ├── docker-compose.yml
 └── pyproject.toml
 ```
 
-## Development status
+## Requirements
 
-### Phase 0 — foundation
+- Windows 10/11 or Linux
+- Python 3.12+ for local development
+- Docker Desktop for the recommended Windows setup
+- FFmpeg/ffprobe when running outside Docker
+- An English→Vietnamese Argos model for local translation
 
-- [x] Repository initialized
-- [x] Architecture documented
-- [x] Provider boundaries defined
-- [ ] API health endpoint
-- [ ] Database models/migrations
-- [ ] Redis/Celery worker
-- [ ] Acquisition adapter
+## Docker quick start
 
-### Phase 1 — local video pipeline
+```powershell
+copy .env.example .env
+docker compose up -d --build
+docker compose ps
+```
 
-- [ ] Video validation
-- [ ] Audio extraction
-- [ ] ASR with timestamps
-- [ ] Vietnamese translation/rewrite
-- [ ] TTS with duration fitting
-- [ ] Subtitle generation
-- [ ] FFmpeg rendering
-- [ ] Quality gate
+API: `http://localhost:8000`
+Swagger: `http://localhost:8000/docs`
+Health: `http://localhost:8000/health`
 
-### Phase 2 — automation
+## Local development
 
-- [ ] Trend discovery
-- [ ] Deduplication/fingerprinting
-- [ ] Content scoring
-- [ ] Scheduler
-- [ ] Official publishing adapters
-- [ ] Retry/backoff/idempotency
-- [ ] Analytics
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+pip install -e ".[dev,media,translation]"
+pytest -q
+ruff check .
+```
 
-### Phase 3 — production
+## Configuration
 
-- [ ] GPU worker profile
-- [ ] Object storage
-- [ ] Secrets management
-- [ ] Observability
-- [ ] Multi-account support
-- [ ] Cost/usage tracking
+See `.env.example`. Important defaults:
 
-## Research references
+```env
+MIN_VIDEO_DURATION=10
+MAX_VIDEO_DURATION=180
+WHISPER_MODEL=small
+TRANSLATION_PROVIDER=argos
+TTS_PROVIDER=edge
+TTS_VOICE=vi-VN-HoaiMyNeural
+OUTPUT_WIDTH=1080
+OUTPUT_HEIGHT=1920
+```
 
-The architecture was informed by open-source projects covering individual parts of the problem: AI video localization/dubbing, Douyin/URL acquisition, timestamped ASR, TTS, FFmpeg rendering, and social scheduling. We intentionally avoid copying project code; ScanVideo uses adapter interfaces and original orchestration.
+A source below 10 seconds is rejected; 10.0 seconds is accepted. Artifacts are stored per job under `/data/media/jobs/{job_id}/` and the pipeline reuses valid checkpoints where possible.
 
-## License
+## API
 
-Project code will be licensed after the dependency/model license matrix is finalized.
+Implemented now:
+
+- `GET /health`
+- `GET /api/v1`
+- `POST /api/v1/jobs`
+- `GET /api/v1/jobs`
+- `GET /api/v1/jobs/{job_id}`
+- `GET /api/v1/jobs/{job_id}/status`
+- `GET /api/v1/dashboard/summary`
+- `GET /api/v1/dashboard/jobs`
+
+Publishing, scheduling, trends, and analytics endpoints are being added only when their backing implementation is real.
+
+## Quality and safety
+
+QC requires a non-empty file, video stream, audio stream, expected 1080×1920 dimensions, valid duration, and a full FFmpeg decode check. The project does not bypass DRM/CAPTCHA/anti-bot controls, steal cookies or sessions, access private content without authorization, or bypass platform rate limits.
+
+Only download, transform, and publish content you are legally permitted to use.
+
+See `docs/LOCAL_AI.md` and `docs/SECURITY.md` for details.

@@ -16,12 +16,26 @@ def create_job(request: CreateJobRequest) -> JobResponse:
         request.target_language,
         request.min_duration,
         request.max_duration,
+        request.auto_publish,
     )
     return job
 
 
+@router.get("", response_model=list[JobResponse])
+def list_jobs() -> list[JobResponse]:
+    return [JobResponse.model_validate(item) for item in job_store.list_all()]
+
+
 @router.get("/{job_id}", response_model=JobResponse)
 def get_job(job_id: str) -> JobResponse:
+    job = job_store.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
+
+
+@router.get("/{job_id}/status", response_model=JobResponse)
+def get_job_status(job_id: str) -> JobResponse:
     job = job_store.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
