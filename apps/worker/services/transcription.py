@@ -14,9 +14,10 @@ class TranscriptSegment:
 class WhisperTranscriber:
     """Lazy-loaded faster-whisper adapter with automatic CPU/CUDA selection."""
 
-    def __init__(self, model_size: str = "small", device: str = "auto") -> None:
+    def __init__(self, model_size: str = "small", device: str = "auto", compute_type: str = "auto") -> None:
         self.model_size = model_size
         self.device = device
+        self.compute_type = compute_type
         self._model = None
         self.detected_language: str | None = None
 
@@ -31,13 +32,23 @@ class WhisperTranscriber:
                     device = "cuda" if torch.cuda.is_available() else "cpu"
                 except ImportError:
                     device = "cpu"
-            compute_type = "float16" if device == "cuda" else "int8"
+            compute_type = self.compute_type
+            if compute_type == "auto":
+                compute_type = "float16" if device == "cuda" else "int8"
             self._model = WhisperModel(self.model_size, device=device, compute_type=compute_type)
         return self._model
 
     def transcribe(self, media_path: Path, language: str | None = None) -> list[TranscriptSegment]:
         model = self._load()
-        segments, info = model.transcribe(str(media_path), language=language, vad_filter=True, condition_on_previous_text=False)
+        segments, info = model.transcribe(
+            str(media_path),
+            language=language,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500},
+            condition_on_previous_text=False,
+            beam_size=5,
+            temperature=0.0,
+        )
         self.detected_language = getattr(info, "language", None)
         return [
             TranscriptSegment(float(s.start), float(s.end), s.text.strip())
