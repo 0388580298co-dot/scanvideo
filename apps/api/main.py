@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from apps.api.routes.dashboard import router as dashboard_router
 from apps.api.routes.jobs import router as jobs_router
 
 app = FastAPI(
@@ -9,6 +10,7 @@ app = FastAPI(
 )
 
 app.include_router(jobs_router)
+app.include_router(dashboard_router, prefix="/api/v1")
 
 
 @app.get("/health")
@@ -18,8 +20,4 @@ def health() -> dict[str, str]:
 
 @app.get("/api/v1")
 def api_info() -> dict[str, str]:
-    return {
-        "name": "ScanVideo",
-        "version": "0.1.0",
-        "status": "pipeline-ready",
-    }
+    return {"name": "ScanVideo", "version": "0.1.0", "status": "pipeline-ready"}
