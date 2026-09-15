@@ -15,11 +15,7 @@ def mix_narration_with_background(
     narration_gain_db: float = 0.0,
     background_gain_db: float = -18.0,
 ) -> Path:
-    """Mix localized narration into the source audio without overlapping narration clips.
-
-    Each narration clip is delayed to its source segment start. The original audio is
-    deliberately reduced so residual source speech does not overpower the translation.
-    """
+    """Mix localized narration into source audio with safe timing and peak limiting."""
     if not source.exists() or not narration_paths or len(narration_paths) != len(segments):
         raise MediaError("Audio mix inputs are missing or inconsistent")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -42,7 +38,8 @@ def mix_narration_with_background(
 
     mix_inputs = "[bg]" + "".join(delayed_labels)
     filters.append(
-        f"{mix_inputs}amix=inputs={len(delayed_labels) + 1}:duration=first:dropout_transition=0:normalize=0[aout]"
+        f"{mix_inputs}amix=inputs={len(delayed_labels) + 1}:duration=first:dropout_transition=0:normalize=0," 
+        "alimiter=limit=0.95:level_in=1:level_out=1[aout]"
     )
     command = [
         "ffmpeg",
