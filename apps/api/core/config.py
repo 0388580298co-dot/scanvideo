@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:3000"]
     redis_url: str = "redis://redis:6379/0"
     database_url: str = "postgresql+psycopg://scanvideo:scanvideo@postgres:5432/scanvideo"
-    media_root: Path = Path("/data/media")
+    media_root: Path = Path("./data/media")
+    secret_root: Path = Path("./.secrets")
 
     min_video_duration: float = Field(default=10.0, ge=0)
     max_video_duration: float = Field(default=180.0, gt=0)
@@ -52,3 +53,4 @@ class Settings(BaseSettings):
 
 settings = Settings()
 settings.media_root.mkdir(parents=True, exist_ok=True)
+settings.secret_root.mkdir(parents=True, exist_ok=True)
