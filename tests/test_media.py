@@ -56,7 +56,33 @@ def test_download_adds_optional_douyin_cookie_file(monkeypatch: pytest.MonkeyPat
     assert command[command.index("--cookies") + 1] == "/secrets/douyin.cookies.txt"
 
 
-def test_download_reports_douyin_cookie_requirement(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_download_falls_back_to_browser_for_douyin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_run(command: list[str], **kwargs):
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 1,
+                "stderr": "ERROR: Failed to parse JSON: Expecting value in ''",
+                "stdout": "",
+            },
+        )()
+
+    expected = tmp_path / "source.mp4"
+    expected.write_bytes(b"browser-video")
+    monkeypatch.delenv("DOUYIN_COOKIE_FILE", raising=False)
+    monkeypatch.setattr("apps.worker.services.media.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "apps.worker.services.media._browser_download_douyin",
+        lambda *args, **kwargs: expected,
+    )
+
+    result = download_video("https://www.douyin.com/video/7677584450095549705", tmp_path)
+
+    assert result == expected
+
+
+def test_download_reports_browser_fallback_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def fake_run(command: list[str], **kwargs):
         return type(
             "Result",
@@ -70,6 +96,10 @@ def test_download_reports_douyin_cookie_requirement(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.delenv("DOUYIN_COOKIE_FILE", raising=False)
     monkeypatch.setattr("apps.worker.services.media.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "apps.worker.services.media._browser_download_douyin",
+        lambda *args, **kwargs: (_ for _ in ()).throw(MediaError("browser could not expose video source")),
+    )
 
-    with pytest.raises(MediaError, match="Douyin yêu cầu cookie mới"):
+    with pytest.raises(MediaError, match="browser could not expose video source"):
         download_video("https://www.douyin.com/video/7677584450095549705", tmp_path)
