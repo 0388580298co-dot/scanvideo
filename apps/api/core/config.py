@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://scanvideo:scanvideo@postgres:5432/scanvideo"
     media_root: Path = Path("./data/media")
     secret_root: Path = Path("./.secrets")
+    trend_feed_urls: list[str] = []
 
     min_video_duration: float = Field(default=10.0, ge=0)
     max_video_duration: float = Field(default=180.0, gt=0)
