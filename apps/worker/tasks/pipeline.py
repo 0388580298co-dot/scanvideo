@@ -51,7 +51,7 @@ def run_pipeline(self, job_id: str, source_url: str, target_language: str, min_d
         source_path = next((p for p in job_dir.glob("source.*") if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}), None)
         if source_path is None:
             job_store.update(job_id, status=JobStatus.DOWNLOADING, progress=10, message="Downloading source video")
-            source_path = download_video(source_url, job_dir)
+            source_path = download_video(source_url, job_dir, min_duration=min_seconds, max_duration=max_seconds)
         job_store.update(job_id, status=JobStatus.VALIDATING, progress=20, message="Checking media and duration")
         metadata = validate_video(source_path, min_seconds, max_seconds)
         fingerprint = sha256_file(source_path)
