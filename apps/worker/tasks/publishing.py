@@ -49,7 +49,10 @@ def _publish(post: ScheduledPost, job: Job, account: PlatformAccount | None = No
             token_file,
         ).upload(path, post.title, post.description, privacy=post.privacy_level or "private")
     if post.platform == "tiktok":
-        return TikTokPublisher(token_file=credential_ref).publish_file(
+        token_file = credential_ref or Path(
+            os.getenv("TIKTOK_TOKEN_FILE", "/secrets/oauth/tiktok_token.json")
+        )
+        return TikTokPublisher(token_file=token_file).publish_file(
             path, post.title, privacy_level=post.privacy_level or "SELF_ONLY"
         )
     raise PublishingError(f"Unsupported platform: {post.platform}")
@@ -63,7 +66,9 @@ def _publisher(account: PlatformAccount, platform: str):
             credential_ref or Path(os.getenv("YOUTUBE_TOKEN_FILE", "/secrets/youtube_token.json")),
         )
     if platform == "tiktok":
-        return TikTokPublisher(token_file=credential_ref)
+        return TikTokPublisher(token_file=credential_ref or Path(
+            os.getenv("TIKTOK_TOKEN_FILE", "/secrets/oauth/tiktok_token.json")
+        ))
     raise PublishingError(f"Unsupported platform: {platform}")
 
 
