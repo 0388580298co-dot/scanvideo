@@ -109,6 +109,19 @@ class ScheduledPost(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class PublishAttempt(Base):
+    __tablename__ = "publish_attempts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scheduled_post_id: Mapped[int] = mapped_column(ForeignKey("scheduled_posts.id", ondelete="CASCADE"), unique=True, index=True)
+    platform: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="STARTED", index=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    provider_status: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 class PublishedPost(Base):
     __tablename__ = "published_posts"
     id: Mapped[int] = mapped_column(primary_key=True)
