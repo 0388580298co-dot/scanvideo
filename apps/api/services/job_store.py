@@ -11,20 +11,11 @@ from apps.api.schemas.jobs import CreateJobRequest, JobResponse, JobStatus
 
 
 class JobStore:
-    """PostgreSQL-backed job repository."""
+    """PostgreSQL-backed job repository and source-media registry."""
 
     def create(self, request: CreateJobRequest) -> JobResponse:
         now = datetime.now(timezone.utc)
-        record = Job(
-            id=uuid.uuid4().hex,
-            status=JobStatus.QUEUED.value,
-            source_url=request.source_url,
-            target_language=request.target_language,
-            auto_publish=request.auto_publish,
-            created_at=now,
-            updated_at=now,
-            message="Job queued",
-        )
+        record = Job(id=uuid.uuid4().hex, status=JobStatus.QUEUED.value, source_url=request.source_url, target_language=request.target_language, auto_publish=request.auto_publish, created_at=now, updated_at=now, message="Job queued")
         with SessionLocal() as session:
             session.add(record)
             session.commit()
@@ -57,46 +48,21 @@ class JobStore:
 
     def find_source_by_fingerprint(self, fingerprint: str) -> SourceMedia | None:
         with SessionLocal() as session:
-            return session.scalar(select(SourceMedia).where(SourceMedia.fingerprint == fingerprint))
+            record = session.scalar(select(SourceMedia).where(SourceMedia.fingerprint == fingerprint))
+            if record is None:
+                return None
+            session.expunge(record)
+            return record
 
-    def register_source_media(
-        self,
-        job_id: str,
-        source_url: str,
-        fingerprint: str,
-        path: str,
-        duration: float,
-        width: int,
-        height: int,
-    ) -> None:
-        record = SourceMedia(
-            job_id=job_id,
-            source_url=source_url,
-            fingerprint=fingerprint,
-            path=path,
-            duration=duration,
-            width=width,
-            height=height,
-        )
+    def register_source_media(self, *, job_id: str, source_url: str, fingerprint: str, path: str, duration: float, width: int, height: int) -> None:
         with SessionLocal() as session:
+            record = SourceMedia(job_id=job_id, source_url=source_url, fingerprint=fingerprint, path=path, duration=duration, width=width, height=height)
             session.add(record)
             session.commit()
 
     @staticmethod
     def _response(record: Job) -> JobResponse:
-        return JobResponse(
-            job_id=record.id,
-            status=JobStatus(record.status),
-            source_url=record.source_url,
-            target_language=record.target_language,
-            progress=record.progress,
-            message=record.message,
-            output_path=record.output_path,
-            error=record.error,
-            auto_publish=record.auto_publish,
-            created_at=record.created_at,
-            updated_at=record.updated_at,
-        )
+        return JobResponse(job_id=record.id, status=JobStatus(record.status), source_url=record.source_url, target_language=record.target_language, progress=record.progress, message=record.message, output_path=record.output_path, error=record.error, auto_publish=record.auto_publish, created_at=record.created_at, updated_at=record.updated_at)
 
 
 job_store = JobStore()
