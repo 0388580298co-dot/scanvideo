@@ -126,9 +126,12 @@ class TikTokPublisher:
             if max_duration <= 0:
                 raise RuntimeError("TikTok returned an invalid maximum video duration")
             try:
-                duration = float(probe_video(video_path)["duration"])
-            except (KeyError, TypeError, ValueError, MediaError) as exc:
+                metadata = probe_video(video_path)
+                duration = float(metadata.get("format", {}).get("duration") or 0)
+            except (TypeError, ValueError, MediaError) as exc:
                 raise RuntimeError("Unable to determine video duration before TikTok upload") from exc
+            if duration <= 0:
+                raise RuntimeError("Unable to determine video duration before TikTok upload")
             if duration > max_duration + 0.05:
                 raise ValueError(
                     f"Video duration {duration:.2f}s exceeds TikTok creator limit {max_duration:.2f}s"
@@ -165,6 +168,8 @@ class TikTokPublisher:
             offset = 0
             while offset < size:
                 data = handle.read(chunk)
+                if not data:
+                    raise RuntimeError("TikTok upload ended before the expected file size")
                 end = offset + len(data) - 1
                 upload = requests.put(
                     upload_url,
@@ -178,4 +183,6 @@ class TikTokPublisher:
                 )
                 upload.raise_for_status()
                 offset += len(data)
+        if offset != size:
+            raise RuntimeError("TikTok upload completed with an unexpected byte count")
         return result
