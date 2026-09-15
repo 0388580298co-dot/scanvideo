@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from apps.api.core.config import settings
 from apps.api.routes.accounts import router as accounts_router
+from apps.api.routes.analytics import router as analytics_router
 from apps.api.routes.dashboard import router as dashboard_router
 from apps.api.routes.jobs import router as jobs_router
 from apps.api.routes.oauth import router as oauth_router
@@ -14,6 +15,7 @@ app.include_router(jobs_router)
 app.include_router(schedule_router)
 app.include_router(accounts_router)
 app.include_router(oauth_router)
+app.include_router(analytics_router)
 app.include_router(dashboard_router, prefix="/api/v1")
 
 
