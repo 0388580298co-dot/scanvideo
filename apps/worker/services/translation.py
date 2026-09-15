@@ -19,14 +19,18 @@ class Translator(Protocol):
 
 
 class PassthroughTranslator:
-    """Deterministic fallback used when no external translation provider is configured."""
-
     def translate(self, segments: list[TranscriptSegment], target_language: str) -> list[TranslationSegment]:
-        return [
-            TranslationSegment(s.start, s.end, s.text, s.text)
-            for s in segments
-        ]
+        return [TranslationSegment(s.start, s.end, s.text, s.text) for s in segments]
 
 
 def translate_segments(segments: list[TranscriptSegment], target_language: str) -> list[TranslationSegment]:
+    if target_language.lower() in {"vi", "vie", "vietnamese"}:
+        try:
+            from apps.worker.services.openai_translate import OpenAITranslator
+            return OpenAITranslator().translate_segments(
+                [TranslationSegment(s.start, s.end, s.text, "") for s in segments], target_language
+            )
+        except Exception:
+            # Keep local/offline development usable when no provider key is configured.
+            pass
     return PassthroughTranslator().translate(segments, target_language)
