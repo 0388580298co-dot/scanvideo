@@ -189,6 +189,9 @@ def publish_scheduled(self, post_id: int) -> dict:
         if existing:
             return {"post_id": post_id, "status": "PUBLISHED", "external_id": existing.external_id}
         attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+        if attempt and not attempt.external_id:
+            # Another worker owns the pre-upload attempt. Do not start a second provider upload.
+            return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt already in progress"}
 
     try:
         if attempt and attempt.external_id:
@@ -204,6 +207,8 @@ def publish_scheduled(self, post_id: int) -> dict:
                 attempt = PublishAttempt(scheduled_post_id=post_id, platform=platform, status="STARTED")
                 session.add(attempt)
                 session.commit()
+            elif not attempt.external_id:
+                return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt already in progress"}
             job_snapshot = Job(id=job_id, source_url="", status="PUBLISHED", output_path=output_path)
             post_snapshot = ScheduledPost(id=post_id, job_id=job_id, platform=platform, title=title, description=description, privacy_level=privacy)
             account_snapshot = PlatformAccount(id=account_id, platform=account_platform, account_name=account_name, credential_ref=credential_ref, enabled=True)
