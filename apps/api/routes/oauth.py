@@ -55,7 +55,7 @@ def youtube_start() -> RedirectResponse:
         raise HTTPException(status_code=503, detail="Install the publishing extra first") from exc
     if not settings.youtube_client_secrets_file.exists():
         raise HTTPException(status_code=503, detail="YouTube client_secret.json is not configured")
-    flow = Flow.from_client_secrets_file(str(settings.youtube_client_secrets_file), scopes=["https://www.googleapis.com/auth/youtube.upload"], redirect_uri="http://localhost:8000/api/v1/oauth/youtube/callback")
+    flow = Flow.from_client_secrets_file(str(settings.youtube_client_secrets_file), scopes=["https://www.googleapis.com/auth/youtube.upload"], redirect_uri=settings.youtube_redirect_uri)
     state = secrets.token_urlsafe(32)
     _save_state("youtube", state)
     url, _ = flow.authorization_url(access_type="offline", include_granted_scopes="true", state=state, prompt="consent")
@@ -69,7 +69,7 @@ def youtube_callback(code: str = Query(...), state: str = Query(...)) -> dict:
         from google_auth_oauthlib.flow import Flow
     except ImportError as exc:
         raise HTTPException(status_code=503, detail="Install the publishing extra first") from exc
-    flow = Flow.from_client_secrets_file(str(settings.youtube_client_secrets_file), scopes=["https://www.googleapis.com/auth/youtube.upload"], redirect_uri="http://localhost:8000/api/v1/oauth/youtube/callback")
+    flow = Flow.from_client_secrets_file(str(settings.youtube_client_secrets_file), scopes=["https://www.googleapis.com/auth/youtube.upload"], redirect_uri=settings.youtube_redirect_uri)
     flow.fetch_token(code=code)
     settings.youtube_token_file.parent.mkdir(parents=True, exist_ok=True)
     settings.youtube_token_file.write_text(flow.credentials.to_json(), encoding="utf-8")
