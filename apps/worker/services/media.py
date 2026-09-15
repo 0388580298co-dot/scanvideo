@@ -2,27 +2,68 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 
 class MediaError(RuntimeError):
     """Raised for download, probing, validation, or media-processing failures."""
 
 
+def normalize_source_url(url: str) -> str:
+    """Normalize source URLs that yt-dlp cannot consume directly.
+
+    Douyin frequently shares videos as ``/jingxuan?modal_id=...`` (and other
+    page routes carrying ``modal_id``).  yt-dlp expects the canonical
+    ``/video/{id}`` route, so convert those links before invoking it.
+    """
+    value = url.strip()
+    parsed = urlparse(value)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host in {"douyin.com", "www.douyin.com", "m.douyin.com"}:
+        modal_id = parse_qs(parsed.query).get("modal_id", [""])[0].strip()
+        if modal_id.isdigit():
+            return f"https://www.douyin.com/video/{modal_id}"
+    return value
+
+
+def _is_douyin_url(url: str) -> bool:
+    host = urlparse(url).netloc.lower().split(":", 1)[0]
+    return host in {"douyin.com", "www.douyin.com", "m.douyin.com", "v.douyin.com"}
+
+
 def download_video(url: str, output_dir: Path, min_duration: float = 10.0, max_duration: float = 180.0) -> Path:
     """Download only sources whose metadata duration is within the configured bounds."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    source_url = normalize_source_url(url)
     template = str(output_dir / "source.%(ext)s")
     duration_filter = f"duration >= {min_duration} & duration <= {max_duration}"
     command = [
         "yt-dlp", "--no-playlist", "--merge-output-format", "mp4",
         "--match-filter", duration_filter,
-        "-f", "bv*+ba/b", "-o", template, url,
+        "-f", "bv*+ba/b", "-o", template,
     ]
-    result = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    if _is_douyin_url(source_url):
+        command.extend(["--add-header", "Referer: https://www.douyin.com/"])
+        cookie_file = os.getenv("DOUYIN_COOKIE_FILE", "").strip()
+        if cookie_file:
+            command.extend(["--cookies", cookie_file])
+    command.append(source_url)
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    except subprocess.TimeoutExpired as exc:
+        raise MediaError(f"Video download timed out after 900 seconds: {source_url}") from exc
     if result.returncode != 0:
-        raise MediaError(result.stderr[-3000:] or "yt-dlp failed or source duration was outside the allowed range")
+        detail = (result.stderr or result.stdout)[-3000:]
+        if _is_douyin_url(source_url) and "Fresh cookies" in detail:
+            raise MediaError(
+                "Douyin yêu cầu cookie mới để tải video. "
+                "Đặt DOUYIN_COOKIE_FILE trỏ tới file cookie của nội dung bạn được phép tải, "
+                "hoặc thử một video Douyin công khai khác."
+            )
+        raise MediaError(detail or "yt-dlp failed or source duration was outside the allowed range")
     candidates = sorted(
         p for p in output_dir.glob("source.*") if p.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}
     )
