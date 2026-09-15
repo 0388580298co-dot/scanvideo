@@ -12,11 +12,7 @@ class TranscriptSegment:
 
 
 class WhisperTranscriber:
-    """Lazy-loaded faster-whisper adapter.
-
-    Keeping model loading inside transcribe() prevents API startup from loading
-    a multi-hundred-MB model and makes the provider replaceable in tests.
-    """
+    """Lazy-loaded faster-whisper adapter with automatic CPU/CUDA selection."""
 
     def __init__(self, model_size: str = "small", device: str = "auto") -> None:
         self.model_size = model_size
@@ -27,7 +23,13 @@ class WhisperTranscriber:
         if self._model is None:
             from faster_whisper import WhisperModel
 
-            device = "cuda" if self.device == "auto" else self.device
+            device = self.device
+            if device == "auto":
+                try:
+                    import torch
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
             compute_type = "float16" if device == "cuda" else "int8"
             self._model = WhisperModel(self.model_size, device=device, compute_type=compute_type)
         return self._model
@@ -40,7 +42,11 @@ class WhisperTranscriber:
             vad_filter=True,
             condition_on_previous_text=False,
         )
-        return [TranscriptSegment(float(s.start), float(s.end), s.text.strip()) for s in segments if s.text.strip()]
+        return [
+            TranscriptSegment(float(s.start), float(s.end), s.text.strip())
+            for s in segments
+            if s.text.strip()
+        ]
 
 
 def save_transcript(segments: list[TranscriptSegment], path: Path) -> None:
