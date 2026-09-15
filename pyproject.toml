@@ -1,0 +1,30 @@
+[project]
+name = "scanvideo"
+version = "0.1.0"
+description = "AI-first short-video localization and publishing platform"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "pydantic-settings>=2.7,<3",
+  "redis>=5,<7",
+  "celery>=5.4,<6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.25,<1",
+  "ruff>=0.11,<1",
+]
+media = [
+  "faster-whisper>=1.1,<2",
+  "yt-dlp>=2026.1,<2027",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
