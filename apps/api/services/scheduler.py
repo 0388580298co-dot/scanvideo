@@ -38,7 +38,8 @@ class SchedulerService:
             package = job.content_package or {}
             title = request.title or str(package.get("title", "ScanVideo"))
             description = request.description or str(package.get("description", ""))
-            post = ScheduledPost(job_id=request.job_id, platform_account_id=account_id, platform=request.platform, title=title, description=description, privacy_level=request.privacy_level, scheduled_at=when, status="SCHEDULED")
+            privacy = request.privacy_level or ("private" if request.platform == "youtube" else "SELF_ONLY")
+            post = ScheduledPost(job_id=request.job_id, platform_account_id=account_id, platform=request.platform, title=title, description=description, privacy_level=privacy, scheduled_at=when, status="SCHEDULED")
             session.add(post)
             job.status = "SCHEDULED"
             job.updated_at = datetime.now(timezone.utc)
