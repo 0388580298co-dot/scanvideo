@@ -1,51 +1,63 @@
 # ScanVideo
 
-> AI-first short-video localization and publishing platform.
+> AI-first, local-first short-video localization and publishing platform.
 
 ScanVideo turns legally usable source media into a Vietnamese short-form package through an observable, resumable pipeline:
 
-**Discover → Acquire → Validate → Transcribe → Translate → Rewrite → Voice → Render → QC → Schedule → Publish → Analyze**
+**Discover → Acquire → Validate → Transcribe → Translate → Rewrite → Voice → Mix → Subtitle → 9:16 → QC → Schedule → Publish → Analyze**
 
-## Current status
+## Current implementation
 
-The repository is in **core pipeline + backend foundation hardening**. The API, Celery/Redis, PostgreSQL/SQLAlchemy/Alembic schema, media validation, timestamp-preserving local translation adapter, Edge TTS, subtitle/rendering services, vertical output, QC, and resumable job artifacts are implemented. The Next.js dashboard, production scheduler, OAuth user flow, full publisher upload operations, and analytics remain later phases.
+The repository now contains the core pipeline, PostgreSQL-backed jobs and source deduplication, deterministic content generation, resumable TTS/render artifacts, Celery + Redis workers, Celery Beat scheduling, a Next.js dashboard, platform account management, official YouTube/TikTok OAuth adapters, durable scheduled publishing, analytics endpoints, Docker Compose, migrations, tests, and CI.
+
+Real publishing still requires the user's own platform application credentials and permissions. No API secret or token is committed to this repository.
 
 ## $0 AI API design
 
 The default localization path does not require OpenAI, Gemini, Claude, or ElevenLabs API keys.
 
 - ASR: `faster-whisper`
-- Translation: `Argos Translate` with a locally installed model
+- Translation: `Argos Translate` with a locally installed language model
 - TTS: `edge-tts`
 - Metadata: deterministic `TemplateContentGenerator`
 - Media: FFmpeg/ffprobe
 
-Optional commercial providers remain optional and are not imported by the default local translation path.
+Optional commercial providers remain optional. The default pipeline does not require them.
 
 ## Architecture
 
 ```text
-Dashboard / client
-       ↓ REST
-     FastAPI
-       ↓
- Redis + Celery ←→ PostgreSQL
-       ↓
- Download → Validate → Whisper → Argos → TTS → Mix → SRT → 9:16 → QC
-       ↓
- Official YouTube / TikTok publisher adapters
+Next.js Dashboard / API client
+             ↓ REST
+          FastAPI
+             ↓
+      PostgreSQL ←→ SQLAlchemy/Alembic
+             ↓
+       Redis ←→ Celery Worker
+             ↑       ↓
+          Celery Beat
+             ↓
+Download → Validate → Whisper → Argos → Script → TTS
+    → Audio Mix → SRT → 9:16 → QC
+             ↓
+       ScheduledPost
+             ↓
+Official YouTube / TikTok APIs
+             ↓
+      PublishedPost → Analytics
 ```
 
-Provider boundaries are kept in `apps/worker/services` so ASR, translation, TTS, download, and publishing implementations can be replaced without rewriting orchestration.
+Provider boundaries live under `apps/worker/services` and publishing adapters are isolated from pipeline orchestration.
 
 ## Repository layout
 
 ```text
 scanvideo/
-├── apps/api/                 # FastAPI API, SQLAlchemy models, job repository
-├── apps/worker/              # Celery tasks and media/AI providers
-├── docs/                     # Architecture, pipeline, local AI and security notes
-├── infra/docker/             # Docker image
+├── apps/api/                 # FastAPI, schemas, DB and OAuth routes
+├── apps/worker/              # Celery tasks and media/AI/publishing providers
+├── web/                      # Next.js dashboard
+├── docs/                     # Architecture, pipeline, local AI and security
+├── infra/docker/             # Docker images
 ├── infra/migrations/         # Alembic migrations
 ├── tests/                    # Unit tests
 ├── .env.example
@@ -57,10 +69,10 @@ scanvideo/
 ## Requirements
 
 - Windows 10/11 or Linux
-- Python 3.12+ for local development
-- Docker Desktop for the recommended Windows setup
-- FFmpeg/ffprobe when running outside Docker
-- An Argos English→Vietnamese or source-language→Vietnamese model for local translation
+- Python 3.12+
+- Docker Desktop on Windows (recommended)
+- FFmpeg/ffprobe outside Docker
+- Argos source→Vietnamese language model for local translation
 
 ## Docker quick start
 
@@ -70,10 +82,18 @@ docker compose up -d --build
 docker compose ps
 ```
 
-The API container waits for healthy PostgreSQL/Redis, runs `alembic upgrade head`, then starts FastAPI.
+Services:
 
-API: `http://localhost:8000`
-Swagger: `http://localhost:8000/docs`
+```text
+api      → http://localhost:8000
+web      → http://localhost:3000
+postgres → 5432
+redis    → 6379
+worker
+beat
+```
+
+Swagger: `http://localhost:8000/docs`  
 Health: `http://localhost:8000/health`
 
 ## Local development
@@ -82,56 +102,122 @@ Health: `http://localhost:8000/health`
 py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -U pip
-pip install -e ".[dev,media,translation]"
+pip install -e ".[dev,media,translation,publishing]"
 pytest -q
 ruff check .
 ```
 
-Set `DATABASE_URL` to a running PostgreSQL instance and run:
+## Job pipeline
 
-```powershell
-alembic upgrade head
-uvicorn apps.api.main:app --reload
+Every job has an isolated directory:
+
+```text
+media/jobs/{job_id}/
+├── source.*
+├── source.wav
+├── transcript.json
+├── translation.vi.json
+├── content.json
+├── subtitles.vi.srt
+├── tts_manifest.json
+├── tts/
+├── localized_narration.mp4
+├── final_vi.mp4
+├── final_vi_9x16.mp4
+└── qc.json
 ```
 
-## Configuration
+Valid artifacts are reused so a failed job can resume instead of starting from zero.
 
-See `.env.example`. Important defaults:
+The mandatory source-duration policy is:
 
-```env
-MIN_VIDEO_DURATION=10
-MAX_VIDEO_DURATION=180
-WHISPER_MODEL=small
-TRANSLATION_PROVIDER=argos
-TTS_PROVIDER=edge
-TTS_VOICE=vi-VN-HoaiMyNeural
-OUTPUT_WIDTH=1080
-OUTPUT_HEIGHT=1920
+```text
+< 10.0s  → reject
+10.0s    → accept
+> 180s   → reject by default
 ```
 
-A source below 10 seconds is rejected; 10.0 seconds is accepted. Artifacts are stored per job under `/data/media/jobs/{job_id}/` and the pipeline reuses valid checkpoints where possible.
+## API
 
-## API currently implemented
+### Jobs
 
-- `GET /health`
-- `GET /api/v1`
-- `POST /api/v1/jobs`
-- `GET /api/v1/jobs`
-- `GET /api/v1/jobs/{job_id}`
-- `GET /api/v1/jobs/{job_id}/status`
-- `GET /api/v1/dashboard/summary`
-- `GET /api/v1/dashboard/jobs`
+```text
+POST /api/v1/jobs
+GET  /api/v1/jobs
+GET  /api/v1/jobs/{job_id}
+GET  /api/v1/jobs/{job_id}/status
+```
 
-Publishing, scheduling, trends, and analytics endpoints are added only when their backing implementation is real.
+### Scheduling
 
-## Database
+```text
+POST /api/v1/schedule
+GET  /api/v1/schedule
+```
 
-PostgreSQL is now the job metadata source of truth. SQLAlchemy 2.x models cover users, jobs, source media, transcripts, translations, TTS segments, rendered media, platform accounts, scheduled posts, published posts, and trend items. Alembic owns schema changes.
+Schedules are persisted in PostgreSQL. Celery Beat checks due posts every 30 seconds and dispatches them to the publishing worker.
 
-## Quality and safety
+### Platform accounts
 
-QC requires a non-empty file, video stream, audio stream, expected 1080×1920 dimensions, valid duration, and a full FFmpeg decode check. The project does not bypass DRM/CAPTCHA/anti-bot controls, steal cookies or sessions, access private content without authorization, or bypass platform rate limits.
+```text
+POST /api/v1/accounts
+GET  /api/v1/accounts
+POST /api/v1/accounts/{account_id}/disable
+```
 
-Only download, transform, and publish content you are legally permitted to use.
+### OAuth
 
-See `docs/LOCAL_AI.md` and `docs/SECURITY.md` for details.
+```text
+GET /api/v1/oauth/youtube/start
+GET /api/v1/oauth/youtube/callback
+GET /api/v1/oauth/tiktok/start
+GET /api/v1/oauth/tiktok/callback
+```
+
+OAuth uses official platform flows. Tokens are stored outside the repository in the configured secret root.
+
+### Analytics
+
+```text
+GET /api/v1/analytics/summary
+GET /api/v1/analytics/published
+```
+
+## YouTube
+
+The project uses the official YouTube Data API and OAuth 2.0. The upload adapter uses resumable media upload and defaults to private visibility. Real publishing requires a Google Cloud OAuth client and the YouTube Data API enabled.
+
+## TikTok
+
+The project uses TikTok Login Kit OAuth and Content Posting API. Direct posting requires the appropriate approved scope. TikTok's current Direct Post API requires querying creator information and honoring the privacy options returned by TikTok. Unaudited clients are restricted to private visibility by TikTok.
+
+## Security
+
+Never commit:
+
+```text
+.env
+.secrets/
+client_secret*.json
+*.pem
+*.key
+*_token.json
+```
+
+No password, cookie, session or platform credential is required by the application source. OAuth state is validated to reduce CSRF risk. Publishing only uses official APIs.
+
+The system does not bypass DRM, CAPTCHA, anti-bot controls, rate limits, private-content controls, or authentication.
+
+## Testing and CI
+
+Python CI runs Ruff and Pytest. Dashboard CI runs TypeScript type checking and Next.js production build.
+
+If GitHub Actions is still running, its result should be treated as authoritative for the exact repository revision; local media integration tests require FFmpeg and AI model dependencies.
+
+## Windows notes
+
+Docker Desktop is the recommended Windows path because it supplies PostgreSQL, Redis, FFmpeg and the Python worker environment consistently. For native execution, use PowerShell and install FFmpeg/ffprobe on PATH.
+
+## Copyright / content rights
+
+Only download, transform, and publish content that you own or are legally permitted to use. Platform APIs and AI providers have their own terms, quotas, audits and content policies.
