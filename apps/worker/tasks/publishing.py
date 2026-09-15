@@ -98,6 +98,26 @@ def _snapshot(session, post_id: int):
     )
 
 
+def _claim_publish_attempt(session, post_id: int, platform: str) -> PublishAttempt | None:
+    """Atomically claim the single publish-attempt slot for a scheduled post.
+
+    The unique constraint is the source of truth when multiple workers race. A loser
+    must treat the post as already owned rather than converting the race into FAILED.
+    """
+    attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+    if attempt is not None:
+        return attempt
+
+    attempt = PublishAttempt(scheduled_post_id=post_id, platform=platform, status="STARTED")
+    session.add(attempt)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        return None
+    return attempt
+
+
 def _finalize_published(session, post_id: int, job_id: str, platform: str, external_id: str, response: dict) -> None:
     now = datetime.now(timezone.utc)
     post = session.get(ScheduledPost, post_id)
@@ -203,17 +223,11 @@ def publish_scheduled(self, post_id: int) -> dict:
             job_id, platform, title, description, privacy, output_path, account_id, account_platform, account_name, credential_ref = _snapshot(session, post_id)
             if not output_path:
                 raise PublishingError("Job has no output media")
-            attempt = session.query(PublishAttempt).filter(PublishAttempt.scheduled_post_id == post_id).first()
+            attempt = _claim_publish_attempt(session, post_id, platform)
             if attempt is None:
-                attempt = PublishAttempt(scheduled_post_id=post_id, platform=platform, status="STARTED")
-                session.add(attempt)
-                try:
-                    session.commit()
-                except IntegrityError:
-                    session.rollback()
-                    return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt claimed by another worker"}
-            elif not attempt.external_id:
-                return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt already in progress"}
+                return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt claimed by another worker"}
+            if attempt.external_id:
+                return {"post_id": post_id, "status": "PROCESSING", "message": "publish attempt already submitted"}
             job_snapshot = Job(id=job_id, source_url="", status="PUBLISHED", output_path=output_path)
             post_snapshot = ScheduledPost(id=post_id, job_id=job_id, platform=platform, title=title, description=description, privacy_level=privacy)
             account_snapshot = PlatformAccount(id=account_id, platform=account_platform, account_name=account_name, credential_ref=credential_ref, enabled=True)
