@@ -4,8 +4,6 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
-
 from apps.api.db.base import SessionLocal
 from apps.api.db.models import Job, PublishedPost, ScheduledPost
 from apps.worker.celery_app import celery_app
@@ -23,18 +21,15 @@ def _publish(post: ScheduledPost, job: Job) -> dict:
     path = Path(job.output_path)
     if not path.exists() or path.stat().st_size == 0:
         raise PublishingError("Output media is missing")
-
     if post.platform == "youtube":
-        credentials = Path(os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "/secrets/client_secret.json"))
-        token = Path(os.getenv("YOUTUBE_TOKEN_FILE", "/secrets/youtube_token.json"))
-        publisher = YouTubePublisher(credentials, token)
-        return publisher.upload(path, post.title, post.description, privacy=post.privacy_level or "private")
+        return YouTubePublisher(
+            Path(os.getenv("YOUTUBE_CLIENT_SECRETS_FILE", "/secrets/client_secret.json")),
+            Path(os.getenv("YOUTUBE_TOKEN_FILE", "/secrets/youtube_token.json")),
+        ).upload(path, post.title, post.description, privacy=post.privacy_level or "private")
     if post.platform == "tiktok":
-        token = os.getenv("TIKTOK_ACCESS_TOKEN", "")
-        if not token:
-            raise PublishingError("TIKTOK_ACCESS_TOKEN is not configured")
-        publisher = TikTokPublisher(token)
-        return publisher.publish_file(path, post.title, privacy_level=post.privacy_level or "SELF_ONLY")
+        return TikTokPublisher(os.getenv("TIKTOK_ACCESS_TOKEN") or None).publish_file(
+            path, post.title, privacy_level=post.privacy_level or "SELF_ONLY"
+        )
     raise PublishingError(f"Unsupported platform: {post.platform}")
 
 
@@ -49,7 +44,6 @@ def publish_scheduled(self, post_id: int) -> dict:
         job = session.get(Job, post.job_id)
         if job is None:
             raise PublishingError("Job not found")
-
     try:
         result = _publish(post, job)
         external_id = str(result.get("id") or result.get("data", {}).get("publish_id") or "")
@@ -79,7 +73,6 @@ def publish_scheduled(self, post_id: int) -> dict:
 @celery_app.task(name="scanvideo.dispatch_due_posts")
 def dispatch_due_posts() -> dict:
     from apps.api.services.scheduler import scheduler_service
-
     ids = scheduler_service.due()
     for post_id in ids:
         publish_scheduled.delay(post_id)
