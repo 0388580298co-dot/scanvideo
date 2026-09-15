@@ -8,7 +8,7 @@ from sqlalchemy import select
 from apps.api.core.config import settings
 from apps.api.db.base import SessionLocal
 from apps.api.db.models import TrendItem as TrendItemModel
-from apps.worker.services.trends import RssTrendProvider, TrendItem
+from apps.worker.services.trends import RssTrendProvider
 
 router = APIRouter(prefix="/api/v1/trends", tags=["trends"])
 
@@ -43,7 +43,11 @@ def discover(limit: int = Query(default=20, ge=1, le=100)) -> list[dict]:
                 existing.duration = item.duration
                 existing.discovered_at = now
         session.commit()
-        rows = session.scalars(select(TrendItemModel).order_by(TrendItemModel.score.desc(), TrendItemModel.discovered_at.desc()).limit(limit)).all()
+        rows = session.scalars(
+            select(TrendItemModel)
+            .order_by(TrendItemModel.score.desc(), TrendItemModel.discovered_at.desc())
+            .limit(limit)
+        ).all()
         return [
             {
                 "id": row.id,
