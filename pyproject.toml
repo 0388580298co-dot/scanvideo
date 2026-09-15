@@ -1,6 +1,6 @@
 [project]
 name = "scanvideo"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI-first short-video localization and publishing platform"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -23,7 +23,7 @@ dev = [
 ]
 media = [
   "faster-whisper>=1.1,<2",
-  "yt-dlp>=2026.1,<2027",
+  "yt-dlp>=2026.7.4,<2027",
   "edge-tts>=7,<8",
 ]
 translation = [
