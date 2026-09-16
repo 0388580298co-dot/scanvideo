@@ -51,6 +51,8 @@ def _probe_has_audio(path: Path) -> bool:
 def _looks_like_video_response(url: str, content_type: str, resource_type: str = "") -> bool:
     """Identify a likely public video response without bypassing access controls."""
     media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type.startswith("audio/"):
+        return False
     if media_type.startswith("video/") or resource_type == "media":
         return True
     path = urlparse(url).path.lower()
