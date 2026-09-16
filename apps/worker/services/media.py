@@ -29,11 +29,34 @@ def _is_douyin_url(url: str) -> bool:
     return host in {"douyin.com", "www.douyin.com", "m.douyin.com", "v.douyin.com"}
 
 
-def _browser_download_douyin(url: str, output_dir: Path, min_duration: float, max_duration: float) -> Path:
+def _probe_has_audio(path: Path) -> bool:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type", "-of", "json", str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return False
+        payload = json.loads(result.stdout or "{}")
+        return bool(payload.get("streams"))
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return False
+
+
+def _browser_download_douyin(
+    url: str, output_dir: Path, min_duration: float, max_duration: float
+) -> Path:
     """Use a normal browser page as a Douyin fallback when yt-dlp cannot extract it.
 
-    This only loads the public page and reads the HTML5 video source; it does not
-    solve CAPTCHAs, bypass access controls, or evade rate limits.
+    Some Douyin pages expose a video-only HTML5 source while audio is requested as a
+    separate media resource. We capture public audio responses from the same browser
+    page and mux one into the video when necessary. This does not solve CAPTCHAs,
+    bypass access controls, or evade rate limits.
     """
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -45,27 +68,44 @@ def _browser_download_douyin(url: str, output_dir: Path, min_duration: float, ma
 
     output_dir.mkdir(parents=True, exist_ok=True)
     target = output_dir / "source.mp4"
+    browser_video = output_dir / ".douyin-browser-video.mp4"
+    audio_candidates: list[str] = []
     try:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             try:
-                page = browser.new_page(
+                context = browser.new_context(
                     user_agent=(
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
                     ),
                     extra_http_headers={"Referer": "https://www.douyin.com/"},
                 )
+                page = context.new_page()
+                media_responses: list[tuple[str, str]] = []
+
+                def capture_media(response) -> None:
+                    content_type = response.headers.get("content-type", "").lower()
+                    if content_type.startswith("audio/") or content_type.startswith("video/"):
+                        media_responses.append((response.url, content_type))
+
+                page.on("response", capture_media)
                 page.goto(url, wait_until="domcontentloaded", timeout=45_000)
                 page.wait_for_function(
                     "() => Array.from(document.querySelectorAll('video')).some(v => v.currentSrc || v.src)",
                     timeout=30_000,
                 )
+                page.wait_for_timeout(3000)
+
                 video_info = page.locator("video").evaluate_all(
-                    "els => els.map(v => ({src: v.currentSrc || v.src, duration: v.duration})).filter(x => x.src)"
+                    """els => els.flatMap(v => [
+                        {src: v.currentSrc || v.src, duration: v.duration},
+                        ...Array.from(v.querySelectorAll('source[src]')).map(s => ({src: s.src, duration: v.duration}))
+                    ]).filter(x => x.src && !x.src.startsWith('blob:'))"""
                 )
                 if not video_info:
                     raise MediaError("Douyin page không cung cấp video source công khai cho trình duyệt.")
+
                 info = next((item for item in video_info if item.get("src")), video_info[0])
                 duration = float(info.get("duration") or 0)
                 if duration and (duration < min_duration or duration > max_duration):
@@ -73,15 +113,62 @@ def _browser_download_douyin(url: str, output_dir: Path, min_duration: float, ma
                         f"Video is outside duration limits: {duration:.2f}s "
                         f"(allowed {min_duration:.2f}-{max_duration:.2f}s)"
                     )
+
                 video_url = str(info["src"])
-                response = page.request.get(
+                response = context.request.get(
                     video_url,
                     headers={"Referer": "https://www.douyin.com/"},
                     timeout=120_000,
                 )
                 if not response.ok:
                     raise MediaError(f"Douyin video source returned HTTP {response.status}")
-                target.write_bytes(response.body())
+                browser_video.write_bytes(response.body())
+
+                if _probe_has_audio(browser_video):
+                    browser_video.replace(target)
+                    return target
+
+                dom_audio = page.locator("audio").evaluate_all(
+                    """els => els.flatMap(a => [
+                        a.currentSrc || a.src,
+                        ...Array.from(a.querySelectorAll('source[src]')).map(s => s.src)
+                    ]).filter(Boolean).filter(x => !x.startsWith('blob:'))"""
+                )
+                for audio_url in [*dom_audio, *[u for u, ct in media_responses if ct.startswith("audio/")]]:
+                    if audio_url and audio_url not in audio_candidates and audio_url != video_url:
+                        audio_candidates.append(audio_url)
+
+                for index, audio_url in enumerate(audio_candidates[:12]):
+                    try:
+                        audio_response = context.request.get(
+                            audio_url,
+                            headers={"Referer": "https://www.douyin.com/"},
+                            timeout=60_000,
+                        )
+                        if not audio_response.ok:
+                            continue
+                        audio_path = output_dir / f".douyin-browser-audio-{index}"
+                        audio_path.write_bytes(audio_response.body())
+                        if not _probe_has_audio(audio_path):
+                            audio_path.unlink(missing_ok=True)
+                            continue
+
+                        mux = subprocess.run(
+                            [
+                                "ffmpeg", "-y", "-v", "error",
+                                "-i", str(browser_video), "-i", str(audio_path),
+                                "-map", "0:v:0", "-map", "1:a:0",
+                                "-c:v", "copy", "-c:a", "aac", "-shortest", str(target),
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=180,
+                        )
+                        audio_path.unlink(missing_ok=True)
+                        if mux.returncode == 0 and target.exists() and _probe_has_audio(target):
+                            return target
+                    except (OSError, subprocess.SubprocessError):
+                        continue
             finally:
                 browser.close()
     except PlaywrightTimeoutError as exc:
@@ -90,13 +177,20 @@ def _browser_download_douyin(url: str, output_dir: Path, min_duration: float, ma
         raise
     except Exception as exc:
         raise MediaError(f"Douyin browser fallback failed: {exc}") from exc
+    finally:
+        browser_video.unlink(missing_ok=True)
+        for path in output_dir.glob(".douyin-browser-audio-*"):
+            path.unlink(missing_ok=True)
 
-    if not target.exists() or target.stat().st_size == 0:
-        raise MediaError("Douyin browser fallback produced an empty video file")
-    return target
+    raise MediaError(
+        "Douyin browser fallback chỉ lấy được video không có audio; "
+        "trang không cung cấp audio resource công khai có thể tải trực tiếp."
+    )
 
 
-def download_video(url: str, output_dir: Path, min_duration: float = 10.0, max_duration: float = 180.0) -> Path:
+def download_video(
+    url: str, output_dir: Path, min_duration: float = 10.0, max_duration: float = 180.0
+) -> Path:
     """Download only sources whose metadata duration is within the configured bounds."""
     output_dir.mkdir(parents=True, exist_ok=True)
     source_url = normalize_source_url(url)
