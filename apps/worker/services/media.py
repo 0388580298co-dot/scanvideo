@@ -48,10 +48,10 @@ def _probe_has_audio(path: Path) -> bool:
         return False
 
 
-def _looks_like_video_response(url: str, content_type: str) -> bool:
-    """Identify a likely public video response without trying to bypass access controls."""
+def _looks_like_video_response(url: str, content_type: str, resource_type: str = "") -> bool:
+    """Identify a likely public video response without bypassing access controls."""
     media_type = content_type.split(";", 1)[0].strip().lower()
-    if media_type.startswith("video/"):
+    if media_type.startswith("video/") or resource_type == "media":
         return True
     path = urlparse(url).path.lower()
     return path.endswith((".mp4", ".mov", ".webm", ".m4v"))
@@ -96,12 +96,13 @@ def _browser_download_douyin(
 
                 def capture_media(response) -> None:
                     content_type = response.headers.get("content-type", "").lower()
+                    resource_type = getattr(response.request, "resource_type", "")
                     try:
                         content_length = int(response.headers.get("content-length", "0"))
                     except ValueError:
                         content_length = 0
                     item = (response.url, content_type, content_length)
-                    if _looks_like_video_response(response.url, content_type):
+                    if _looks_like_video_response(response.url, content_type, resource_type):
                         video_responses.append(item)
                     elif content_type.split(";", 1)[0].strip().startswith("audio/"):
                         audio_responses.append(item)
@@ -138,12 +139,15 @@ def _browser_download_douyin(
                     for item in video_info
                     if item.get("src") and not str(item["src"]).startswith("blob:")
                 ]
-                response_urls = [url for url, _, _ in sorted(video_responses, key=lambda x: x[2], reverse=True)]
+                response_urls = [
+                    item[0] for item in sorted(video_responses, key=lambda x: x[2], reverse=True)
+                ]
                 candidates: list[str] = []
                 for candidate in [*video_urls, *response_urls]:
                     if candidate and candidate not in candidates:
                         candidates.append(candidate)
 
+                video_downloaded = False
                 for video_url in candidates[:16]:
                     try:
                         response = context.request.get(
@@ -160,12 +164,17 @@ def _browser_download_douyin(
                         if not probe_video_is_video(browser_video):
                             browser_video.unlink(missing_ok=True)
                             continue
+                        video_downloaded = True
                         if _probe_has_audio(browser_video):
                             browser_video.replace(target)
                             return target
-                        break
                     except (OSError, PlaywrightTimeoutError):
                         continue
+
+                if not video_downloaded:
+                    raise MediaError(
+                        "Douyin browser observed media requests, but no downloadable public video response was obtained."
+                    )
 
                 dom_audio = page.locator("audio").evaluate_all(
                     """els => els.flatMap(a => [
